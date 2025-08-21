@@ -1,10 +1,9 @@
 name: Lottery Scraper Schedule
 
-# Trigger: daily at 2 AM UTC
 on:
   schedule:
-    - cron: '0 2 * * *'  # 2 AM UTC daily
-  workflow_dispatch:  # Allows manual runs
+    - cron: '0 2 * * *'  # 2 AM UTC
+  workflow_dispatch:
 
 jobs:
   run-scraper:
@@ -25,10 +24,9 @@ jobs:
         pip install -r requirements.txt
 
     - name: Run lottery scraper
-  run: |
-    echo "${{ secrets.FIREBASE_KEY }}" > serviceAccountKey.json
-    export GOOGLE_APPLICATION_CREDENTIALS="$PWD/serviceAccountKey.json"
-    python lottery_hot_numbers_firestore.py
-
-
-
+      env:
+        FIREBASE_KEY: ${{ secrets.FIREBASE_KEY }}
+      run: |
+        echo "$FIREBASE_KEY" > serviceAccountKey.json
+        export GOOGLE_APPLICATION_CREDENTIALS="$PWD/serviceAccountKey.json"
+        python lottery_hot_numbers_firestore.py
