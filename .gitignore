@@ -1,0 +1,21 @@
+cat > .gitignore <<'EOF'
+# Virtualenv
+venv/
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+
+# Do NOT commit service account JSONs (catch common names)
+lotto-draw-generator-app-firebase-adminsdk-*.json
+serviceAccount.json
+*.key
+*.pem
+
+# Optional: don't commit generated JSON outputs if you want them local only
+*_hot.json
+
+# Node, etc (if present)
+node_modules/
+EOF
