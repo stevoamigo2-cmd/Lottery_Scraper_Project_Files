@@ -25,9 +25,9 @@ jobs:
         pip install -r requirements.txt
 
     - name: Run lottery scraper
-      env:
-        GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.FIREBASE_KEY }}
       run: |
         echo "${{ secrets.FIREBASE_KEY }}" > serviceAccountKey.json
+        export GOOGLE_APPLICATION_CREDENTIALS="$PWD/serviceAccountKey.json"
         python lottery_hot_numbers_firestore.py
+
 
