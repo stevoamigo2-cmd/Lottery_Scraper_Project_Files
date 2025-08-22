@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # lottery_hot_numbers_with_firestore.py
-# Scrape multiple National Lottery draw-history pages, compute "hot" numbers,
+# Scrape multiple National Lottery & other draw-history pages, compute "hot" numbers,
 # and save results to Firestore. Designed to run inside CI (GitHub Actions)
 # or locally. Uses firebase-admin.
 
@@ -9,7 +9,6 @@ import json
 import io
 import re
 import csv
-import time
 from datetime import datetime, timedelta
 from collections import Counter
 
@@ -25,6 +24,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; LotteryHotBot/1.0)"}
 DAYS_BACK = int(os.environ.get("DAYS_BACK", "60"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
 
+# NOTE: JSON URLs for US multi-jurisdiction games (NY state data)
 LOTTERIES = {
     "euromillions": {
         "html_url": "https://www.national-lottery.co.uk/results/euromillions/draw-history",
@@ -45,6 +45,18 @@ LOTTERIES = {
         "html_url": "https://www.national-lottery.co.uk/results/set-for-life/draw-history",
         "csv_url":  "https://www.national-lottery.co.uk/results/set-for-life/draw-history/csv",
         "page_id": "set-for-life",
+    },
+    "megamillions": {
+        "json_url": "https://data.ny.gov/resource/h6w8-42p9.json",
+        "main_count": 5,
+        "bonus_count": 1,
+        "page_id": "megamillions",
+    },
+    "powerball": {
+        "json_url": "https://data.ny.gov/resource/5xaw-6ayf.json",
+        "main_count": 5,
+        "bonus_count": 1,
+        "page_id": "powerball",
     },
     "euromillions-hotpicks": {
         "html_url": "https://www.national-lottery.co.uk/results/euromillions-hotpicks/draw-history",
@@ -104,56 +116,96 @@ def scrape_html(draw_cfg):
     return draws
 
 def parse_csv_text(csv_text):
+    # same as your previous robust parser
+    GAME_SPECS = {
+        "powerball": {"main": 5, "bonus": 1},
+        "megamillions": {"main": 5, "bonus": 1},
+        "euromillions": {"main": 5, "bonus": 2},
+        "lotto": {"main": 6, "bonus": 0},
+        "thunderball": {"main": 5, "bonus": 1},
+        "set-for-life": {"main": 5, "bonus": 1},
+    }
+
+    lines = [ln for ln in csv_text.splitlines() if ln.strip()]
+    first_line = lines[0] if lines else ""
+    delimiter = "\t" if "\t" in first_line else ","
+
+    f_dict = io.StringIO(csv_text)
+    dreader = csv.DictReader(f_dict)
+    fieldnames = dreader.fieldnames or []
+    if any("date" in (fn or "").lower() for fn in fieldnames):
+        draws = []
+        f = io.StringIO(csv_text)
+        reader = csv.DictReader(f)
+        for row in reader:
+            date_str = None
+            for k in row:
+                if 'date' in k.lower():
+                    date_str = (row[k] or "").strip()
+                    break
+            if not date_str:
+                continue
+            date_obj = None
+            for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d %b %Y", "%d %B %Y", "%m/%d/%Y"):
+                try:
+                    date_obj = datetime.strptime(date_str, fmt).date()
+                    break
+                except Exception:
+                    pass
+            if not date_obj:
+                continue
+
+            nums = []
+            bonus = []
+            for k, v in row.items():
+                if not v:
+                    continue
+                if re.search(r'ball|num|pick|winning', k, re.I) and not re.search(r'bonus|power|mega|megap', k, re.I):
+                    found = re.findall(r'\d{1,2}', v)
+                    nums.extend([int(x) for x in found])
+                if re.search(r'bonus|power|mega|megap|thunder', k, re.I):
+                    found = re.findall(r'\d{1,2}', v)
+                    bonus.extend([int(x) for x in found])
+            if nums:
+                draws.append({"date": date_obj.isoformat(), "main": nums, "bonus": bonus})
+        return draws
+
+    # fallback: simple tabular parsing
     f = io.StringIO(csv_text)
-    reader = csv.DictReader(f)
+    reader = csv.reader(f, delimiter=delimiter)
     draws = []
     for row in reader:
-        date_str = None
-        for k in row:
-            if 'date' in k.lower():
-                date_str = (row[k] or "").strip()
-                break
-        if not date_str:
+        if not row:
             continue
-        date_obj = None
-        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d %b %Y", "%d %B %Y"):
-            try:
-                date_obj = datetime.strptime(date_str, fmt).date()
-                break
-            except Exception:
-                pass
-        if not date_obj:
-            continue
-        nums = []
-        bonus = []
-        for k, v in row.items():
-            if not v:
-                continue
-            if re.search(r'ball', k, re.I) and not re.search(r'bonus', k, re.I):
-                found = re.findall(r'\d{1,2}', v)
-                if found:
-                    nums.extend([int(x) for x in found])
-            if re.search(r'bonus', k, re.I) or re.search(r'thunder', k, re.I):
-                found = re.findall(r'\d{1,2}', v)
-                if found:
-                    bonus.extend([int(x) for x in found])
-        if not nums:
-            for k,v in row.items():
-                if v and re.search(r'\d', v):
-                    found = re.findall(r'\d{1,2}', v)
-                    if len(found) >= 3:
-                        nums = [int(x) for x in found]
-                        break
-        if nums:
-            draws.append({"date": date_obj.isoformat(), "main": nums, "bonus": bonus})
+        joined = ",".join(row)
+        nums = re.findall(r'\d{1,2}', joined)
+        if len(nums) >= 5:
+            draws.append({"date": datetime.utcnow().date().isoformat(), "main": [int(x) for x in nums[:5]], "bonus": [int(x) for x in nums[5:]]})
     return draws
 
 def fetch_csv(draw_cfg):
     csv_url = draw_cfg.get("csv_url")
     if not csv_url:
         return []
-    txt = fetch_url(csv_url)
+    r = requests.get(csv_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+    txt = r.content.decode("ISO-8859-1")
     return parse_csv_text(txt)
+
+def fetch_ny_lottery_json(url, main_count=5, bonus_count=1):
+    r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    draws = []
+    for entry in data:
+        date_obj = datetime.strptime(entry['draw_date'], '%Y-%m-%dT%H:%M:%S.%f').date()
+        main = [int(entry[f'num{i}']) for i in range(1, main_count+1)]
+        if bonus_count == 1:
+            bonus = [int(entry.get('powerball') or entry.get('megaplier') or 0)]
+        else:
+            bonus = []
+        draws.append({"date": date_obj.isoformat(), "main": main, "bonus": bonus})
+    return draws
 
 def filter_recent(draws, days_back):
     cutoff = datetime.utcnow().date() - timedelta(days=days_back)
@@ -167,25 +219,15 @@ def compute_hot(draws, top_n=10):
         bc.update(d.get("bonus", []))
     return mc.most_common(top_n), bc.most_common(top_n)
 
-# ------------ Firestore setup ------------
 def init_firestore():
-    """
-    Initialization logic:
-    - If environment variable FIREBASE_SERVICE_ACCOUNT contains the full JSON,
-      use that.
-    - Otherwise Fall back to GOOGLE_APPLICATION_CREDENTIALS path.
-    """
     try:
         if firebase_admin._apps:
             return firestore.client()
     except Exception:
         pass
-
     sa_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
     gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-
     if sa_json:
-        # service account JSON supplied as a secret string
         sa_obj = json.loads(sa_json)
         cred = credentials.Certificate(sa_obj)
         firebase_admin.initialize_app(cred)
@@ -193,10 +235,8 @@ def init_firestore():
         cred = credentials.Certificate(gac)
         firebase_admin.initialize_app(cred)
     else:
-        # If running on GCP with default service account this can still work.
         firebase_admin.initialize_app()
     return firestore.client()
-
 
 def save_to_firestore(db, key, out):
     col = db.collection("lotteries")
@@ -211,7 +251,6 @@ def run_and_save():
         print("[info] Firestore client initialized.")
     except Exception as e:
         print("[warning] Could not initialize Firestore:", e)
-        # Still continue — we'll save JSON files locally
         db = None
 
     results = {}
@@ -219,13 +258,23 @@ def run_and_save():
         print(f"\n== Processing {key} ==")
         draws = []
         try:
-            draws = scrape_html(cfg)
-            if not draws:
-                print("[debug] No draws found by HTML, trying CSV fallback.")
-                draws = fetch_csv(cfg)
-            print(f"[debug] parsed draws: {len(draws)}")
+            # NY JSON feeds for Powerball & Mega Millions
+            if "json_url" in cfg:
+                draws = fetch_ny_lottery_json(cfg["json_url"], cfg.get("main_count",5), cfg.get("bonus_count",1))
+                print(f"[debug] parsed draws from JSON: {len(draws)}")
+            # prefer CSV when available (UK lotteries)
+            elif cfg.get("csv_url"):
+                try:
+                    draws = fetch_csv(cfg)
+                    print(f"[debug] parsed draws from CSV: {len(draws)}")
+                except Exception as e:
+                    print(f"[warning] CSV fetch/parse failed for {key}: {e}")
+            # fallback to HTML scraping if empty
+            if not draws and "html_url" in cfg:
+                draws = scrape_html(cfg)
+                print(f"[debug] parsed draws from HTML: {len(draws)}")
+
             recent = filter_recent(draws, DAYS_BACK)
-            print(f"[debug] recent draws (last {DAYS_BACK} days): {len(recent)}")
             top_main, top_bonus = compute_hot(recent, top_n=10)
 
             out = {
@@ -237,13 +286,11 @@ def run_and_save():
             }
             results[key] = out
 
-            # local JSON save
             fname = f"{key}_hot.json"
             with open(fname, "w", encoding="utf-8") as f:
                 json.dump(out, f, indent=2)
             print(f"[debug] Saved {fname}")
 
-            # save to Firestore if available
             if db is not None:
                 try:
                     save_to_firestore(db, key, out)
