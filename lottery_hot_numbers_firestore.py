@@ -9,6 +9,7 @@ import json
 import io
 import re
 import csv
+import time
 from datetime import datetime, timedelta
 from collections import Counter
 
@@ -24,7 +25,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; LotteryHotBot/1.0)"}
 DAYS_BACK = int(os.environ.get("DAYS_BACK", "60"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
 
-# NOTE: JSON URLs for US multi-jurisdiction games (NY state data)
+# NOTE: csv_url values are examples — confirm working CSV download links for your target host.
+# Many official lottery sites or state lottery portals expose CSV downloads, but paths can change.
 LOTTERIES = {
     "euromillions": {
         "html_url": "https://www.national-lottery.co.uk/results/euromillions/draw-history",
@@ -46,16 +48,17 @@ LOTTERIES = {
         "csv_url":  "https://www.national-lottery.co.uk/results/set-for-life/draw-history/csv",
         "page_id": "set-for-life",
     },
+    # Third-party / state CSV examples for US multi-jurisdiction games:
     "megamillions": {
-        "json_url": "https://data.ny.gov/resource/h6w8-42p9.json",
-        "main_count": 5,
-        "bonus_count": 1,
+        "html_url": "https://www.megamillions.com/winning-numbers/previous-drawings.aspx",
+        # Example CSV from a state portal — replace if invalid for your environment.
+        "csv_url": "https://www.texaslottery.com/export/sites/lottery/Games/Mega_Millions/Winning_Numbers/megamillions.csv",
         "page_id": "megamillions",
     },
     "powerball": {
-        "json_url": "https://data.ny.gov/resource/5xaw-6ayf.json",
-        "main_count": 5,
-        "bonus_count": 1,
+        "html_url": "https://www.powerball.com/previous-results",
+        # Example CSV from a state portal — replace if invalid for your environment.
+        "csv_url": "https://www.texaslottery.com/export/sites/lottery/Games/Powerball/Winning_Numbers/powerball.csv",
         "page_id": "powerball",
     },
     "euromillions-hotpicks": {
@@ -116,9 +119,15 @@ def scrape_html(draw_cfg):
     return draws
 
 def parse_csv_text(csv_text):
-    # same as your previous robust parser
+    """
+    Robust CSV/TSV parser:
+    - If there are column headers containing 'date', uses DictReader logic.
+    - Otherwise parses headerless rows like:
+      Game<TAB>Month<TAB>Day<TAB>Year<TAB>num1<TAB>num2<...>
+      and splits numbers into main vs bonus based on GAME_SPECS or heuristics.
+    """
     GAME_SPECS = {
-        "powerball": {"main": 5, "bonus": 1},
+        "powerball": {"main": 5, "bonus": 1},        # 5 white + 1 red (+ multiplier)
         "megamillions": {"main": 5, "bonus": 1},
         "euromillions": {"main": 5, "bonus": 2},
         "lotto": {"main": 6, "bonus": 0},
@@ -126,10 +135,12 @@ def parse_csv_text(csv_text):
         "set-for-life": {"main": 5, "bonus": 1},
     }
 
+    # sniff delimiter from first non-empty line
     lines = [ln for ln in csv_text.splitlines() if ln.strip()]
     first_line = lines[0] if lines else ""
     delimiter = "\t" if "\t" in first_line else ","
 
+    # try DictReader if header present (and contains 'date' header)
     f_dict = io.StringIO(csv_text)
     dreader = csv.DictReader(f_dict)
     fieldnames = dreader.fieldnames or []
@@ -166,21 +177,112 @@ def parse_csv_text(csv_text):
                 if re.search(r'bonus|power|mega|megap|thunder', k, re.I):
                     found = re.findall(r'\d{1,2}', v)
                     bonus.extend([int(x) for x in found])
+
+            if not nums:
+                for v in row.values():
+                    if v and re.search(r'\d', v):
+                        found = re.findall(r'\d{1,2}', v)
+                        if len(found) >= 3:
+                            nums = [int(x) for x in found]
+                            break
+
             if nums:
                 draws.append({"date": date_obj.isoformat(), "main": nums, "bonus": bonus})
         return draws
 
-    # fallback: simple tabular parsing
+    # fallback: headerless/tabular rows
     f = io.StringIO(csv_text)
     reader = csv.reader(f, delimiter=delimiter)
     draws = []
     for row in reader:
         if not row:
             continue
-        joined = ",".join(row)
-        nums = re.findall(r'\d{1,2}', joined)
-        if len(nums) >= 5:
-            draws.append({"date": datetime.utcnow().date().isoformat(), "main": [int(x) for x in nums[:5]], "bonus": [int(x) for x in nums[5:]]})
+        # trim whitespace from cells
+        row = [c.strip() for c in row if c is not None and c.strip() != ""]
+
+        # common headerless pattern: GameName, Month, Day, Year, num1, num2, ...
+        if len(row) >= 5 and not row[0].isdigit() and not re.match(r'^\d{4}(-\d{2}-\d{2})?$', row[0]):
+            game = row[0].lower()
+            try:
+                month = int(row[1])
+                day = int(row[2])
+                year = int(row[3])
+                date_obj = datetime(year, month, day).date()
+            except Exception:
+                # if date parse fails: continue
+                continue
+
+            numeric_tail = [c for c in row[4:] if re.search(r'\d', c)]
+            numbers = []
+            for n in numeric_tail:
+                found = re.findall(r'\d{1,2}', n)
+                numbers.extend([int(x) for x in found])
+
+            spec = None
+            for k in GAME_SPECS:
+                if game.startswith(k):
+                    spec = GAME_SPECS[k]
+                    break
+
+            if spec:
+                main_count = spec.get("main", 5)
+                mains = numbers[:main_count]
+                bonus = numbers[main_count:]
+            else:
+                # heuristic fallback
+                if len(numbers) == 6:
+                    mains = numbers[:5]
+                    bonus = numbers[5:]
+                elif len(numbers) == 7:
+                    mains = numbers[:5]
+                    bonus = numbers[5:]
+                elif len(numbers) == 8:
+                    mains = numbers[:7]
+                    bonus = numbers[7:]
+                else:
+                    mains = numbers[:5]
+                    bonus = numbers[5:]
+
+            draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+        else:
+            # last-resort parsing when first cell looks numeric (e.g. date-first CSV lines)
+            joined = ",".join(row)
+            # find date-like substring
+            date_obj = None
+            m = re.search(r'(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})', joined)
+            if m:
+                date_str = m.group(1)
+                for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+                    try:
+                        date_obj = datetime.strptime(date_str, fmt).date()
+                        break
+                    except Exception:
+                        pass
+            if not date_obj:
+                # attempt if leading YYYY,MM,DD pattern
+                parts = row[:4]
+                try:
+                    if len(parts) >= 3 and all(p.isdigit() for p in parts[:3]):
+                        # assume month/day/year or year/month/day unclear; try month/day/year then year/month/day
+                        try:
+                            date_obj = datetime(int(parts[2]), int(parts[0]), int(parts[1])).date()
+                        except Exception:
+                            date_obj = datetime(int(parts[0]), int(parts[1]), int(parts[2])).date()
+                except Exception:
+                    date_obj = None
+
+            if not date_obj:
+                continue
+
+            nums = re.findall(r'\d{1,2}', joined)
+            if len(nums) >= 6:
+                # take last up to 8 numbers heuristically
+                numbers = [int(x) for x in nums[-8:]]
+                if len(numbers) >= 6:
+                    mains = numbers[:5]
+                    bonus = numbers[5:]
+                    draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+
     return draws
 
 def fetch_csv(draw_cfg):
@@ -189,23 +291,9 @@ def fetch_csv(draw_cfg):
         return []
     r = requests.get(csv_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
-    txt = r.content.decode("ISO-8859-1")
+    txt = r.content.decode("ISO-8859-1")  # Texas Lottery CSVs often need this
     return parse_csv_text(txt)
 
-def fetch_ny_lottery_json(url, main_count=5, bonus_count=1):
-    r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
-    draws = []
-    for entry in data:
-        date_obj = datetime.strptime(entry['draw_date'], '%Y-%m-%dT%H:%M:%S.%f').date()
-        main = [int(entry[f'num{i}']) for i in range(1, main_count+1)]
-        if bonus_count == 1:
-            bonus = [int(entry.get('powerball') or entry.get('megaplier') or 0)]
-        else:
-            bonus = []
-        draws.append({"date": date_obj.isoformat(), "main": main, "bonus": bonus})
-    return draws
 
 def filter_recent(draws, days_back):
     cutoff = datetime.utcnow().date() - timedelta(days=days_back)
@@ -220,21 +308,33 @@ def compute_hot(draws, top_n=10):
     return mc.most_common(top_n), bc.most_common(top_n)
 
 def init_firestore():
+    """
+    Initialization logic:
+    - If environment variable FIREBASE_SERVICE_ACCOUNT contains the full JSON,
+      use that.
+    - Otherwise Fall back to GOOGLE_APPLICATION_CREDENTIALS path.
+    """
     try:
         if firebase_admin._apps:
+            print("[debug] firebase-admin already initialized")
             return firestore.client()
     except Exception:
         pass
+
     sa_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
     gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+
     if sa_json:
+        print("[debug] Initializing Firestore from FIREBASE_SERVICE_ACCOUNT env")
         sa_obj = json.loads(sa_json)
         cred = credentials.Certificate(sa_obj)
         firebase_admin.initialize_app(cred)
     elif gac and os.path.exists(gac):
+        print(f"[debug] Initializing Firestore from GOOGLE_APPLICATION_CREDENTIALS: {gac}")
         cred = credentials.Certificate(gac)
         firebase_admin.initialize_app(cred)
     else:
+        print("[debug] Initializing Firestore with default application credentials (ADC)")
         firebase_admin.initialize_app()
     return firestore.client()
 
@@ -251,6 +351,7 @@ def run_and_save():
         print("[info] Firestore client initialized.")
     except Exception as e:
         print("[warning] Could not initialize Firestore:", e)
+        # Still continue — we'll save JSON files locally
         db = None
 
     results = {}
@@ -258,23 +359,23 @@ def run_and_save():
         print(f"\n== Processing {key} ==")
         draws = []
         try:
-            # NY JSON feeds for Powerball & Mega Millions
-            if "json_url" in cfg:
-                draws = fetch_ny_lottery_json(cfg["json_url"], cfg.get("main_count",5), cfg.get("bonus_count",1))
-                print(f"[debug] parsed draws from JSON: {len(draws)}")
-            # prefer CSV when available (UK lotteries)
-            elif cfg.get("csv_url"):
+            # prefer CSV when available (more stable than HTML scraping)
+            if cfg.get("csv_url"):
                 try:
                     draws = fetch_csv(cfg)
-                    print(f"[debug] parsed draws from CSV: {len(draws)}")
+                    if draws:
+                        print(f"[debug] parsed draws from CSV: {len(draws)}")
                 except Exception as e:
                     print(f"[warning] CSV fetch/parse failed for {key}: {e}")
-            # fallback to HTML scraping if empty
-            if not draws and "html_url" in cfg:
+                    draws = []
+            # fallback to HTML scraping if CSV empty or not available
+            if not draws:
+                print("[debug] No draws found by CSV, trying HTML scraping.")
                 draws = scrape_html(cfg)
                 print(f"[debug] parsed draws from HTML: {len(draws)}")
 
             recent = filter_recent(draws, DAYS_BACK)
+            print(f"[debug] recent draws (last {DAYS_BACK} days): {len(recent)}")
             top_main, top_bonus = compute_hot(recent, top_n=10)
 
             out = {
@@ -286,11 +387,13 @@ def run_and_save():
             }
             results[key] = out
 
+            # local JSON save
             fname = f"{key}_hot.json"
             with open(fname, "w", encoding="utf-8") as f:
                 json.dump(out, f, indent=2)
             print(f"[debug] Saved {fname}")
 
+            # save to Firestore if available
             if db is not None:
                 try:
                     save_to_firestore(db, key, out)
