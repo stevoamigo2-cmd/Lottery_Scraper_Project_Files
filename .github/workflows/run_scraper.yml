@@ -27,8 +27,3 @@ jobs:
       run: python lottery_hot_numbers_firestore.py
       env:
         FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-
-    - name: Run stats processor
-      run: python lottery_stats_firestore.py
-      env:
-        FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
