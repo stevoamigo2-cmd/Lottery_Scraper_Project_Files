@@ -197,6 +197,7 @@ def init_firestore():
         firebase_admin.initialize_app()
     return firestore.client()
 
+
 def save_to_firestore(db, key, out):
     col = db.collection("lotteries")
     doc = col.document(key)
