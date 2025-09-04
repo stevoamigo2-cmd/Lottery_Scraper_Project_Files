@@ -91,14 +91,21 @@ def try_parse_date_any(text):
     text = (text or "").strip()
     if not text:
         return None
-    # Trim unwanted labels like "Draw Date:" etc.
     text = re.sub(r'(?i)draw date[:\s]*', '', text).strip()
-    fmts = ("%d %b %Y", "%d %B %Y", "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y")
+
+    fmts = (
+        "%d %b %Y", "%d %B %Y", "%d/%m/%Y", "%Y-%m-%d",
+        "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y",
+        "%b %d, %Y", "%B %d, %Y",         # "Jan 14, 2025" / "January 14, 2025"
+        "%a %d %b %Y", "%A %d %B %Y",     # "Sat 14 Jun 2025" / "Saturday 14 June 2025"
+        "%a, %b %d, %Y", "%A, %B %d, %Y"  # "Sat, Jun 14, 2025"
+    )
     for fmt in fmts:
         try:
             return datetime.strptime(text, fmt).date()
         except Exception:
             pass
+
     # try to find a date fragment inside the string
     m = re.search(r'(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})', text)
     if m:
@@ -107,7 +114,18 @@ def try_parse_date_any(text):
                 return datetime.strptime(m.group(1), fmt).date()
             except Exception:
                 pass
+
+    # try "MonthName day, year" inside text
+    m2 = re.search(r'([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})', text)
+    if m2:
+        for fmt in ("%b %d, %Y", "%B %d, %Y"):
+            try:
+                return datetime.strptime(m2.group(1), fmt).date()
+            except Exception:
+                pass
+
     return None
+
 
 def scrape_html(draw_cfg):
     """
