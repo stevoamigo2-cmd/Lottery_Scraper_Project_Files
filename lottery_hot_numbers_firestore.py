@@ -87,120 +87,185 @@ def extract_numbers_from_span(text):
     nums = re.findall(r'\d{1,2}', text)
     return [int(n) for n in nums]
 
-def parse_date_span(text):
-    text = text.strip()
-    parts = text.split(" ", 1)
-    date_only = parts[1] if len(parts) == 2 else text
-    for fmt in ("%d %b %Y", "%d %B %Y", "%d/%m/%Y", "%Y-%m-%d"):
+def try_parse_date_any(text):
+    text = (text or "").strip()
+    if not text:
+        return None
+    # Trim unwanted labels like "Draw Date:" etc.
+    text = re.sub(r'(?i)draw date[:\s]*', '', text).strip()
+    fmts = ("%d %b %Y", "%d %B %Y", "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y")
+    for fmt in fmts:
         try:
-            return datetime.strptime(date_only, fmt).date()
+            return datetime.strptime(text, fmt).date()
         except Exception:
             pass
+    # try to find a date fragment inside the string
+    m = re.search(r'(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})', text)
+    if m:
+        for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(m.group(1), fmt).date()
+            except Exception:
+                pass
     return None
 
 def scrape_html(draw_cfg):
+    """
+    More resilient HTML scraping fallback:
+    - Try the original selector
+    - If nothing found, search for list items or table rows containing a date & numbers
+    """
     url = draw_cfg["html_url"]
+    print(f"[debug] Scrape HTML: {url}")
     soup = fetch_soup(url)
+
+    # 1) original specific selector attempt
     selector = f"#draw_history_{draw_cfg['page_id']} ul.list_table_presentation"
     entries = soup.select(selector)
     draws = []
-    for ul in entries:
-        spans = ul.select("span.table_cell_block")
-        if len(spans) >= 3:
-            date_txt = spans[0].get_text(" ", strip=True)
-            main_txt = spans[2].get_text(" ", strip=True) if len(spans) >= 3 else ""
-            bonus_txt = spans[3].get_text(" ", strip=True) if len(spans) >= 4 else ""
-            date_obj = parse_date_span(date_txt)
-            if date_obj is None:
-                continue
-            mains = extract_numbers_from_span(main_txt)
-            bonuses = extract_numbers_from_span(bonus_txt)
-            draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonuses})
+    if entries:
+        for ul in entries:
+            spans = ul.select("span.table_cell_block")
+            if len(spans) >= 3:
+                date_txt = spans[0].get_text(" ", strip=True)
+                main_txt = spans[2].get_text(" ", strip=True) if len(spans) >= 3 else ""
+                bonus_txt = spans[3].get_text(" ", strip=True) if len(spans) >= 4 else ""
+                date_obj = try_parse_date_any(date_txt)
+                if date_obj is None:
+                    continue
+                mains = extract_numbers_from_span(main_txt)
+                bonuses = extract_numbers_from_span(bonus_txt)
+                draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonuses})
+        if draws:
+            return draws
+
+    # 2) generic fallback: find any list/table rows that contain a date and some numbers
+    candidates = soup.find_all(['li', 'tr', 'div'])
+    for el in candidates:
+        text = el.get_text(" ", strip=True)
+        if not text:
+            continue
+        # require at least 3 numbers and a date-like substring
+        if len(re.findall(r'\d{1,2}', text)) < 3:
+            continue
+        # try to parse date substring
+        date_match = None
+        # common patterns like "Sat 24 May 2025" or "24/05/2025"
+        m = re.search(r'(\d{1,2}\s+\w{3,9}\s+\d{4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\w+\s+\d{1,2},\s*\d{4})', text)
+        if m:
+            date_match = m.group(1)
+        if not date_match:
+            # try to find a leading 'Date:' label
+            m2 = re.search(r'date[:\s]*([^\|\,\-]{6,20})', text, re.I)
+            if m2:
+                date_match = m2.group(1)
+        if not date_match:
+            continue
+        date_obj = try_parse_date_any(date_match)
+        if not date_obj:
+            continue
+        # extract numbers (first up to 8)
+        nums = [int(x) for x in re.findall(r'\d{1,2}', text)]
+        mains = nums[:5]
+        bonus = nums[5:8]
+        draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+
+    print(f"[debug] scrape_html parsed draws: {len(draws)}")
     return draws
 
 def parse_csv_text(csv_text):
     """
-    Robust CSV/TSV parser:
-    - If there are column headers containing 'date', uses DictReader logic.
-    - Otherwise parses headerless rows like:
-      Game<TAB>Month<TAB>Day<TAB>Year<TAB>num1<TAB>num2<...>
-      and splits numbers into main vs bonus based on GAME_SPECS or heuristics.
+    More robust CSV parser:
+    - Detects and strips BOM
+    - Uses csv.Sniffer to detect delimiter (fallback to comma/tab)
+    - Attempts DictReader parsing first (looks for date column); otherwise
+      falls back to headerless heuristics (existing logic preserved)
     """
-    GAME_SPECS = {
-        "powerball": {"main": 5, "bonus": 1},        # 5 white + 1 red (+ multiplier)
-        "megamillions": {"main": 5, "bonus": 1},
-        "euromillions": {"main": 5, "bonus": 2},
-        "lotto": {"main": 6, "bonus": 0},
-        "thunderball": {"main": 5, "bonus": 1},
-        "set-for-life": {"main": 5, "bonus": 1},
-    }
+    if not csv_text:
+        return []
 
-    # sniff delimiter from first non-empty line
+    # strip BOM if present
+    csv_text = csv_text.lstrip('\ufeff\ufeff')
+
+    # quick lines for sniffing
     lines = [ln for ln in csv_text.splitlines() if ln.strip()]
-    first_line = lines[0] if lines else ""
-    delimiter = "\t" if "\t" in first_line else ","
+    sample = "\n".join(lines[:20]) if lines else csv_text[:4096]
 
-    # try DictReader if header present (and contains 'date' header)
-    f_dict = io.StringIO(csv_text)
-    dreader = csv.DictReader(f_dict)
-    fieldnames = dreader.fieldnames or []
+    # try to detect delimiter
+    delimiter = ","
+    try:
+        sniffer = csv.Sniffer()
+        dialect = sniffer.sniff(sample)
+        delimiter = dialect.delimiter
+    except Exception:
+        # fallback heuristics
+        delimiter = "\t" if "\t" in sample else ","
+
+    # try DictReader first if header present
+    f = io.StringIO(csv_text)
+    reader = csv.DictReader(f, delimiter=delimiter)
+    fieldnames = reader.fieldnames or []
     if any("date" in (fn or "").lower() for fn in fieldnames):
         draws = []
-        f = io.StringIO(csv_text)
-        reader = csv.DictReader(f)
-        for row in reader:
+        f2 = io.StringIO(csv_text)
+        reader2 = csv.DictReader(f2, delimiter=delimiter)
+        for row in reader2:
+            # find date column
             date_str = None
             for k in row:
-                if 'date' in k.lower():
+                if 'date' in (k or "").lower():
                     date_str = (row[k] or "").strip()
                     break
             if not date_str:
+                # try common alternatives
+                for alt in ('draw', 'draw_date', 'date_played'):
+                    if alt in row:
+                        date_str = (row[alt] or "").strip()
+                        break
+            if not date_str:
                 continue
-            date_obj = None
-            for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d %b %Y", "%d %B %Y", "%m/%d/%Y"):
-                try:
-                    date_obj = datetime.strptime(date_str, fmt).date()
-                    break
-                except Exception:
-                    pass
+            date_obj = try_parse_date_any(date_str)
             if not date_obj:
                 continue
 
-            nums = []
+            mains = []
             bonus = []
+            # heuristics: look for fields with 'ball', 'num', 'winning' in header
             for k, v in row.items():
                 if not v:
                     continue
-                if re.search(r'ball|num|pick|winning', k, re.I) and not re.search(r'bonus|power|mega|megap', k, re.I):
+                key = (k or "").lower()
+                # main pick fields
+                if re.search(r'ball|num|pick|winning|white', key, re.I) and not re.search(r'bonus|power|mega|megap|thunder', key, re.I):
                     found = re.findall(r'\d{1,2}', v)
-                    nums.extend([int(x) for x in found])
-                if re.search(r'bonus|power|mega|megap|thunder', k, re.I):
+                    mains.extend([int(x) for x in found])
+                elif re.search(r'bonus|power|mega|megap|thunder', key, re.I):
                     found = re.findall(r'\d{1,2}', v)
                     bonus.extend([int(x) for x in found])
-
-            if not nums:
+            # fallback: scan values for numbers if no explicit fields found
+            if not mains:
                 for v in row.values():
                     if v and re.search(r'\d', v):
                         found = re.findall(r'\d{1,2}', v)
                         if len(found) >= 3:
-                            nums = [int(x) for x in found]
+                            mains = [int(x) for x in found[:7]]  # take up to 7
                             break
-
-            if nums:
-                draws.append({"date": date_obj.isoformat(), "main": nums, "bonus": bonus})
+            draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
         return draws
 
-    # fallback: headerless/tabular rows
-    f = io.StringIO(csv_text)
-    reader = csv.reader(f, delimiter=delimiter)
+    # fallback: headerless table parsing (preserves your previous heuristics)
+    f3 = io.StringIO(csv_text)
+    reader3 = csv.reader(f3, delimiter=delimiter)
     draws = []
-    for row in reader:
+    for row in reader3:
         if not row:
             continue
-        # trim whitespace from cells
-        row = [c.strip() for c in row if c is not None and c.strip() != ""]
+        # trim and remove empty columns
+        row = [c.strip() for c in row if c is not None and str(c).strip() != ""]
+        if not row:
+            continue
 
-        # common headerless pattern: GameName, Month, Day, Year, num1, num2, ...
+        # Pattern: GameName, Month, Day, Year, num1, num2, ...
         if len(row) >= 5 and not row[0].isdigit() and not re.match(r'^\d{4}(-\d{2}-\d{2})?$', row[0]):
             game = row[0].lower()
             try:
@@ -209,7 +274,6 @@ def parse_csv_text(csv_text):
                 year = int(row[3])
                 date_obj = datetime(year, month, day).date()
             except Exception:
-                # if date parse fails: continue
                 continue
 
             numeric_tail = [c for c in row[4:] if re.search(r'\d', c)]
@@ -218,6 +282,15 @@ def parse_csv_text(csv_text):
                 found = re.findall(r'\d{1,2}', n)
                 numbers.extend([int(x) for x in found])
 
+            # use same GAME_SPECS mapping as before
+            GAME_SPECS = {
+                "powerball": {"main": 5, "bonus": 1},
+                "megamillions": {"main": 5, "bonus": 1},
+                "euromillions": {"main": 5, "bonus": 2},
+                "lotto": {"main": 6, "bonus": 0},
+                "thunderball": {"main": 5, "bonus": 1},
+                "set-for-life": {"main": 5, "bonus": 1},
+            }
             spec = None
             for k in GAME_SPECS:
                 if game.startswith(k):
@@ -242,57 +315,88 @@ def parse_csv_text(csv_text):
                 else:
                     mains = numbers[:5]
                     bonus = numbers[5:]
-
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
         else:
-            # last-resort parsing when first cell looks numeric (e.g. date-first CSV lines)
+            # last-resort parsing when rows start with date-like values
             joined = ",".join(row)
-            # find date-like substring
             date_obj = None
-            m = re.search(r'(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})', joined)
+            m = re.search(r'(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})', joined)
             if m:
-                date_str = m.group(1)
                 for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
                     try:
-                        date_obj = datetime.strptime(date_str, fmt).date()
+                        date_obj = datetime.strptime(m.group(1), fmt).date()
                         break
                     except Exception:
                         pass
             if not date_obj:
-                # attempt if leading YYYY,MM,DD pattern
                 parts = row[:4]
                 try:
                     if len(parts) >= 3 and all(p.isdigit() for p in parts[:3]):
-                        # assume month/day/year or year/month/day unclear; try month/day/year then year/month/day
                         try:
                             date_obj = datetime(int(parts[2]), int(parts[0]), int(parts[1])).date()
                         except Exception:
                             date_obj = datetime(int(parts[0]), int(parts[1]), int(parts[2])).date()
                 except Exception:
                     date_obj = None
-
             if not date_obj:
                 continue
-
             nums = re.findall(r'\d{1,2}', joined)
             if len(nums) >= 6:
-                # take last up to 8 numbers heuristically
                 numbers = [int(x) for x in nums[-8:]]
                 if len(numbers) >= 6:
                     mains = numbers[:5]
                     bonus = numbers[5:]
                     draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
-
     return draws
 
 def fetch_csv(draw_cfg):
+    """
+    Try a series of CSV url variants and return parsed draws or [].
+    Will attempt different encodings and query param variants.
+    """
     csv_url = draw_cfg.get("csv_url")
-    if not csv_url:
-        return []
-    r = requests.get(csv_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    txt = r.content.decode("ISO-8859-1")  # Texas Lottery CSVs often need this
-    return parse_csv_text(txt)
+    variants = []
+    if csv_url:
+        variants.append(csv_url)
+        # try common param variant
+        if "?" not in csv_url:
+            variants.append(csv_url + "?draws=200")
+    # derived variants from html_url
+    html = draw_cfg.get("html_url", "")
+    if html:
+        if html.endswith("/draw-history"):
+            variants.append(html + "/csv")
+            variants.append(html + "/draw-history/csv")
+        else:
+            variants.append(html.rstrip("/") + "/csv")
+            variants.append(html.rstrip("/") + "/csv?draws=200")
+
+    tried = set()
+    for u in variants:
+        if not u or u in tried:
+            continue
+        tried.add(u)
+        try:
+            print(f"[debug] Attempting CSV URL: {u}")
+            r = requests.get(u, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            # try different encodings: response.encoding or apparent_encoding or utf-8
+            enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
+            try:
+                txt = r.content.decode(enc, errors="replace")
+            except Exception:
+                txt = r.content.decode("ISO-8859-1", errors="replace")
+            draws = parse_csv_text(txt)
+            if draws:
+                print(f"[debug] CSV parsed OK from {u} (rows: {len(draws)})")
+                return draws
+            else:
+                # print a short sample for debugging
+                sample = txt.splitlines()[:8]
+                print(f"[debug] CSV from {u} parsed 0 draws; sample:\n" + "\n".join(sample))
+        except Exception as e:
+            print(f"[warning] CSV fetch failed for {u}: {e}")
+    return []
 
 
 def filter_recent(draws, days_back):
