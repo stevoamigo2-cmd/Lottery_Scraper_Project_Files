@@ -70,6 +70,27 @@ LOTTERIES = {
         "html_url": "https://www.national-lottery.co.uk/results/lotto-hotpicks/draw-history",
         "csv_url": None,
         "page_id": "lotto-hotpicks",
+    },
+    # --- Australia ---
+    "australia_powerball": {
+        "html_url": "https://www.lotterywest.wa.gov.au/games/powerball",
+        "csv_url": "https://api.lotterywest.wa.gov.au/api/v1/games/5132/results-csv",
+        "note": "Official CSV endpoint (Lotterywest API).",
+        "source": "Lotterywest download page / API."
+    },
+    "oz_lotto": {
+        "html_url": "https://www.lotterywest.wa.gov.au/games/oz-lotto",
+        "csv_url": "https://api.lotterywest.wa.gov.au/api/v1/games/5130/results-csv",
+        "note": "Official CSV endpoint (Lotterywest API).",
+        "source": "Lotterywest download page / API."
+    },
+
+
+# --- Italy ---
+    "italy_eurojackpot": {
+        "html_url": "https://www.lotterypost.com/results/italy/eurojackpot/past",
+        "csv_url": "https://github.com/eonurk/EuroJackpot/blob/main/eurojackpot_results.csv?raw=true",
+        "page_id": "italy-eurojackpot"
     }
 }
 
@@ -308,6 +329,10 @@ def parse_csv_text(csv_text):
                 "lotto": {"main": 6, "bonus": 0},
                 "thunderball": {"main": 5, "bonus": 1},
                 "set-for-life": {"main": 5, "bonus": 1},
+                "australia_powerball": {"main": 7, "bonus": 1}, 
+                "powerball_au": {"main": 7, "bonus": 1},        
+                "oz_lotto": {"main": 7, "bonus": 3},            
+                "ozlotto": {"main": 7, "bonus": 3}, 
             }
             spec = None
             for k in GAME_SPECS:
