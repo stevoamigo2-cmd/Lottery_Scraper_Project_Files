@@ -77,12 +77,6 @@ LOTTERIES = {
         "csv_url": "https://api.lotterywest.wa.gov.au/api/v1/games/5132/results-csv",
         "note": "Official CSV endpoint (Lotterywest API).",
         "source": "Lotterywest download page / API."
-    },
-    "oz_lotto": {
-        "html_url": "https://www.lotterywest.wa.gov.au/games/oz-lotto",
-        "csv_url": "https://api.lotterywest.wa.gov.au/api/v1/games/5130/results-csv",
-        "note": "Official CSV endpoint (Lotterywest API).",
-        "source": "Lotterywest download page / API."
     }
 }
 
@@ -323,8 +317,6 @@ def parse_csv_text(csv_text):
                 "set-for-life": {"main": 5, "bonus": 1},
                 "australia_powerball": {"main": 7, "bonus": 1}, 
                 "powerball_au": {"main": 7, "bonus": 1},        
-                "oz_lotto": {"main": 7, "bonus": 2},            
-                "ozlotto": {"main": 7, "bonus": 2}, 
             }
             spec = None
             for k in GAME_SPECS:
