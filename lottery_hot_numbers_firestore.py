@@ -83,14 +83,6 @@ LOTTERIES = {
         "csv_url": "https://api.lotterywest.wa.gov.au/api/v1/games/5130/results-csv",
         "note": "Official CSV endpoint (Lotterywest API).",
         "source": "Lotterywest download page / API."
-    },
-
-
-# --- Italy ---
-    "italy_eurojackpot": {
-        "html_url": "https://www.lotterypost.com/results/italy/eurojackpot/past",
-        "csv_url": "https://github.com/eonurk/EuroJackpot/blob/main/eurojackpot_results.csv?raw=true",
-        "page_id": "italy-eurojackpot"
     }
 }
 
@@ -326,7 +318,6 @@ def parse_csv_text(csv_text):
                 "powerball": {"main": 5, "bonus": 1},
                 "megamillions": {"main": 5, "bonus": 1},
                 "euromillions": {"main": 5, "bonus": 2},
-                "eurojackpot": {"main": 5, "bonus": 2},
                 "lotto": {"main": 6, "bonus": 0},
                 "thunderball": {"main": 5, "bonus": 1},
                 "set-for-life": {"main": 5, "bonus": 1},
