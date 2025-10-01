@@ -326,6 +326,7 @@ def parse_csv_text(csv_text):
                 "powerball": {"main": 5, "bonus": 1},
                 "megamillions": {"main": 5, "bonus": 1},
                 "euromillions": {"main": 5, "bonus": 2},
+                "eurojackpot": {"main": 5, "bonus": 2},
                 "lotto": {"main": 6, "bonus": 0},
                 "thunderball": {"main": 5, "bonus": 1},
                 "set-for-life": {"main": 5, "bonus": 1},
