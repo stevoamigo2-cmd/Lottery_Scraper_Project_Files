@@ -316,7 +316,8 @@ def parse_csv_text(csv_text):
                 "thunderball": {"main": 5, "bonus": 1},
                 "set-for-life": {"main": 5, "bonus": 1},
                 "australia_powerball": {"main": 7, "bonus": 1}, 
-                "powerball_au": {"main": 7, "bonus": 1},        
+                "powerball_au": {"main": 7, "bonus": 1},
+                "spain_loterias": {"main": 6, "bonus": 2},
             }
             spec = None
             for k in GAME_SPECS:
