@@ -77,6 +77,12 @@ LOTTERIES = {
     "page_id": "spain_loterias",
     "note": "Public Google Sheet published as CSV — parser now recognizes FECHA/COMBINACIÓN GANADORA/COMP./R./JOKER"
     },
+    "south_africa_lotto": {
+    "html_url": "https://www.africanlottery.net/lotto-results",  # optional, can be used for HTML fallback
+    "csv_url": "https://www.africanlottery.net/download/sa_lotto.csv",
+    "page_id": "sa_lotto",
+    "note": "Official CSV download for South Africa Lotto."
+    },
 
     # --- Australia ---
     "australia_powerball": {
