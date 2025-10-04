@@ -392,6 +392,8 @@ def parse_csv_text(csv_text):
                 "australia_powerball": {"main": 7, "bonus": 1},
                 "powerball_au": {"main": 7, "bonus": 1},
                 "spain_loterias": {"main": 6, "bonus": 2},
+                "south_africa_lotto": {"main": 6, "bonus": 1},
+
                 # add others as needed...
             }
             spec = None
