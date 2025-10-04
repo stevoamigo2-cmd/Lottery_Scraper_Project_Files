@@ -83,6 +83,13 @@ LOTTERIES = {
     "page_id": "sa_lotto",
     "note": "Official CSV download for South Africa Lotto."
     },
+    "ghana_fortune_thursday": {
+    "html_url": "https://lotteryguru.com/ghana-lottery-results/gh-fortune-thursday/gh-fortune-thursday-results-history",
+    "csv_url": None,
+    "page_id": "ghana_fortune_thursday",
+    "note": "Scraped from LotteryGuru history page; parsed into 5-number draws."
+    },
+
 
     # --- Australia ---
     "australia_powerball": {
@@ -479,6 +486,79 @@ def parse_csv_text(csv_text):
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
     return draws
 
+def scrape_lotteryguru_fortune_thursday(draw_cfg):
+    """
+    Scrape LotteryGuru Fortune Thursday history page and return list of
+    {"date": ISOdate, "main": [...], "bonus": []}.
+    Uses conservative heuristics:
+      - finds table rows <tr>
+      - finds a date cell via try_parse_date_any()
+      - collects numeric tokens from other cells and keeps the last 5 numeric tokens as the winning numbers
+    """
+    url = draw_cfg.get("html_url")
+    print(f"[debug] Scraping LotteryGuru (Fortune Thursday): {url}")
+    try:
+        soup = fetch_soup(url)
+    except Exception as e:
+        print(f"[warning] scrape_lotteryguru_fortune_thursday fetch failed: {e}")
+        return []
+
+    draws = []
+    # Prefer structured tables: iterate <tr> rows
+    rows = soup.find_all("tr")
+    for tr in rows:
+        tds = tr.find_all(['td', 'th'])
+        if not tds:
+            continue
+
+        date_obj = None
+        nums = []
+
+        # Try detect date cell first, then collect numeric tokens from the other cells
+        for td in tds:
+            txt = td.get_text(" ", strip=True)
+            if not date_obj:
+                date_obj = try_parse_date_any(txt)
+                if date_obj:
+                    # found the date cell; do NOT continue (we still want to extract numbers from next tds)
+                    continue
+            # collect numeric tokens from this cell
+            found = re.findall(r'\d{1,3}', txt)
+            if found:
+                # convert to ints
+                for f in found:
+                    try:
+                        nums.append(int(f))
+                    except Exception:
+                        pass
+
+        if not date_obj:
+            # As fallback attempt: try to find date anywhere in the row's text
+            joined = tr.get_text(" ", strip=True)
+            m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', joined)
+            if m:
+                date_obj = try_parse_date_any(m.group(1))
+        if not date_obj:
+            continue
+
+        # Remove obvious year tokens (if present) that equal date_obj.year from nums
+        nums = [n for n in nums if n != date_obj.year]
+
+        # Heuristic: the 5 winning numbers are usually the last 5 numeric tokens on the row
+        if len(nums) < 5:
+            # Not enough numeric tokens — skip
+            continue
+        mains = nums[-5:]
+        # No standard bonus for Fortune Thursday; keep bonus empty
+        draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": []})
+
+    # Sort draws newest-first by date (desc) to be consistent with other sources
+    draws.sort(key=lambda d: d["date"], reverse=True)
+
+    print(f"[debug] scrape_lotteryguru_fortune_thursday: parsed {len(draws)} draws (sample: {draws[:3]})")
+    return draws
+
+
 def parse_sa_lotto_csv(csv_text):
     """
     Robust parser for South Africa Lotto CSV (handles dd.mm.YYYY and other variants).
@@ -690,9 +770,15 @@ def run_and_save():
                     draws = []
             # fallback to HTML scraping if CSV empty or not available
             if not draws:
-                print("[debug] No draws found by CSV, trying HTML scraping.")
-                draws = scrape_html(cfg)
-                print(f"[debug] parsed draws from HTML: {len(draws)}")
+                   print("[debug] No draws found by CSV, trying HTML scraping.")
+                   # special-case LotteryGuru Ghana Fortune Thursday
+            if cfg.get("page_id") == "ghana_fortune_thursday":
+                   draws = scrape_lotteryguru_fortune_thursday(cfg)
+                   print(f"[debug] parsed draws from LotteryGuru: {len(draws)}")
+            else:
+                   draws = scrape_html(cfg)
+                   print(f"[debug] parsed draws from HTML: {len(draws)}")
+
 
             recent = filter_recent(draws, DAYS_BACK)
             print(f"[debug] recent draws (last {DAYS_BACK} days): {len(recent)}")
