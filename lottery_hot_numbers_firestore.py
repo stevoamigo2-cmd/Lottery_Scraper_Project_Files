@@ -488,75 +488,104 @@ def parse_csv_text(csv_text):
 
 def scrape_lotteryguru_fortune_thursday(draw_cfg):
     """
-    Scrape LotteryGuru Fortune Thursday history page and return list of
-    {"date": ISOdate, "main": [...], "bonus": []}.
-    Uses conservative heuristics:
-      - finds table rows <tr>
-      - finds a date cell via try_parse_date_any()
-      - collects numeric tokens from other cells and keeps the last 5 numeric tokens as the winning numbers
+    Robust scraper for LotteryGuru Fortune Thursday history page.
+    Returns list of {"date": ISOdate, "main": [...], "bonus": []}
     """
     url = draw_cfg.get("html_url")
     print(f"[debug] Scraping LotteryGuru (Fortune Thursday): {url}")
     try:
-        soup = fetch_soup(url)
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        html = r.text
+        print(f"[debug] HTTP fetch OK, len(html)={len(html)}")
+        # small HTML sample for debugging
+        print("[debug] html sample:", html[:800].replace('\n',' '))
+        soup = BeautifulSoup(html, "html.parser")
     except Exception as e:
         print(f"[warning] scrape_lotteryguru_fortune_thursday fetch failed: {e}")
         return []
 
     draws = []
-    # Prefer structured tables: iterate <tr> rows
-    rows = soup.find_all("tr")
-    for tr in rows:
-        tds = tr.find_all(['td', 'th'])
-        if not tds:
+
+    # Prefer a table that has a header cell containing 'Date' (case-insensitive)
+    table = None
+    for t in soup.find_all("table"):
+        header_text = " ".join([th.get_text(" ", strip=True).lower() for th in t.find_all("th")])
+        if "date" in header_text or "draw" in header_text:
+            table = t
+            break
+
+    rows = []
+    if table:
+        rows = table.find_all("tr")
+    else:
+        # fallback: try rows anywhere (good to catch list/table markup variations)
+        rows = soup.find_all("tr")
+        if not rows:
+            # if no tr rows, also attempt to find list items with date-like patterns
+            lis = soup.find_all("li")
+            for li in lis:
+                text = li.get_text(" ", strip=True)
+                if re.search(r'\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4}', text) or re.search(r'\w+\s+\d{1,2},\s*\d{4}', text):
+                    rows.append(li)
+
+    for el in rows:
+        text = el.get_text(" ", strip=True)
+        if not text or len(re.findall(r'\d{1,2}', text)) < 5:
             continue
 
+        # Try to get a date from any cell first
         date_obj = None
         nums = []
-
-        # Try detect date cell first, then collect numeric tokens from the other cells
-        for td in tds:
-            txt = td.get_text(" ", strip=True)
-            if not date_obj:
-                date_obj = try_parse_date_any(txt)
-                if date_obj:
-                    # found the date cell; do NOT continue (we still want to extract numbers from next tds)
-                    continue
-            # collect numeric tokens from this cell
-            found = re.findall(r'\d{1,3}', txt)
-            if found:
-                # convert to ints
-                for f in found:
+        # If table-like, iterate cells
+        cells = el.find_all(['td', 'th'])
+        if cells:
+            for td in cells:
+                txt = td.get_text(" ", strip=True)
+                if not date_obj:
+                    date_obj = try_parse_date_any(txt)
+                    if date_obj:
+                        continue
+                # collect numeric groups (allow up to 3 digits)
+                for f in re.findall(r'\d{1,3}', txt):
                     try:
                         nums.append(int(f))
                     except Exception:
                         pass
-
-        if not date_obj:
-            # As fallback attempt: try to find date anywhere in the row's text
-            joined = tr.get_text(" ", strip=True)
-            m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', joined)
+        else:
+            # non-table element (li/div)
+            # get numbers and attempt to find date in the text
+            m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', text)
             if m:
                 date_obj = try_parse_date_any(m.group(1))
+            for f in re.findall(r'\d{1,3}', text):
+                try:
+                    nums.append(int(f))
+                except Exception:
+                    pass
+
+        if not date_obj:
+            # last-chance: try to find a date anywhere in the text
+            m2 = re.search(r'(\w+\s+\d{1,2},\s*\d{4})', text)
+            if m2:
+                date_obj = try_parse_date_any(m2.group(1))
         if not date_obj:
             continue
 
-        # Remove obvious year tokens (if present) that equal date_obj.year from nums
+        # remove tokens that are the year
         nums = [n for n in nums if n != date_obj.year]
 
-        # Heuristic: the 5 winning numbers are usually the last 5 numeric tokens on the row
-        if len(nums) < 5:
-            # Not enough numeric tokens — skip
-            continue
-        mains = nums[-5:]
-        # No standard bonus for Fortune Thursday; keep bonus empty
-        draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": []})
+        # Heuristic: the winning numbers are likely the last 5 numeric tokens
+        if len(nums) >= 5:
+            mains = nums[-5:]
+            draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": []})
 
-    # Sort draws newest-first by date (desc) to be consistent with other sources
+    # sort newest-first (consistent with your script)
     draws.sort(key=lambda d: d["date"], reverse=True)
 
-    print(f"[debug] scrape_lotteryguru_fortune_thursday: parsed {len(draws)} draws (sample: {draws[:3]})")
+    print(f"[debug] scrape_lotteryguru_fortune_thursday: parsed {len(draws)} draws, sample: {draws[:3]}")
     return draws
+
 
 
 def parse_sa_lotto_csv(csv_text):
@@ -751,7 +780,6 @@ def run_and_save():
         print("[info] Firestore client initialized.")
     except Exception as e:
         print("[warning] Could not initialize Firestore:", e)
-        # Still continue — we'll save JSON files locally
         db = None
 
     results = {}
@@ -768,17 +796,17 @@ def run_and_save():
                 except Exception as e:
                     print(f"[warning] CSV fetch/parse failed for {key}: {e}")
                     draws = []
+
             # fallback to HTML scraping if CSV empty or not available
             if not draws:
-                   print("[debug] No draws found by CSV, trying HTML scraping.")
-                   # special-case LotteryGuru Ghana Fortune Thursday
-            if cfg.get("page_id") == "ghana_fortune_thursday":
-                   draws = scrape_lotteryguru_fortune_thursday(cfg)
-                   print(f"[debug] parsed draws from LotteryGuru: {len(draws)}")
-            else:
-                   draws = scrape_html(cfg)
-                   print(f"[debug] parsed draws from HTML: {len(draws)}")
-
+                print("[debug] No draws found by CSV, trying HTML scraping.")
+                # special-case LotteryGuru Ghana Fortune Thursday
+                if cfg.get("page_id") == "ghana_fortune_thursday":
+                    draws = scrape_lotteryguru_fortune_thursday(cfg)
+                    print(f"[debug] parsed draws from LotteryGuru: {len(draws)}")
+                else:
+                    draws = scrape_html(cfg)
+                    print(f"[debug] parsed draws from HTML: {len(draws)}")
 
             recent = filter_recent(draws, DAYS_BACK)
             print(f"[debug] recent draws (last {DAYS_BACK} days): {len(recent)}")
@@ -811,6 +839,7 @@ def run_and_save():
             print(f"[error] {key} failed: {e}")
 
     return results
+
 
 if __name__ == "__main__":
     run_and_save()
