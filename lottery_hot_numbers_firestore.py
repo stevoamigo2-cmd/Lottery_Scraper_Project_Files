@@ -230,7 +230,7 @@ def parse_csv_text(csv_text):
     f = io.StringIO(csv_text)
     reader = csv.DictReader(f, delimiter=delimiter)
     fieldnames = reader.fieldnames or []
-    if any("date" in (fn or "").lower() for fn in fieldnames):
+    if any(any(k in (fn or "").lower() for k in ("date", "fecha")) for fn in fieldnames):
         draws = []
         f2 = io.StringIO(csv_text)
         reader2 = csv.DictReader(f2, delimiter=delimiter)
