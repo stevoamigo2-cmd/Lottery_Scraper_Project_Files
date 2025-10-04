@@ -207,23 +207,23 @@ def scrape_html(draw_cfg):
 
 def parse_csv_text(csv_text):
     """
-    Robust CSV parser:
-    - Strips BOM
-    - Sniffs delimiter
-    - Uses DictReader for clean headered CSVs (supports English + Spanish header names)
-    - Falls back to a row-oriented parser for messy/header-split sheets (like your Spain sheet)
+    Robust CSV parser that handles:
+    - BOM stripping, delimiter sniffing
+    - clean headered CSVs (DictReader) with English/Spanish headers
+    - messy Spanish Google Sheets (row-oriented: first col=date, rest numbers)
+    - whitespace/tokenized headerless files (e.g. "Mega Millions 12 5 2003 12 44 15 ...")
+    Returns: list of {"date": ISOdate, "main": [...], "bonus": [...]}
     """
     if not csv_text:
         return []
 
-    # strip BOM if present
     csv_text = csv_text.lstrip('\ufeff\ufeff')
 
     # quick lines for sniffing
     lines = [ln for ln in csv_text.splitlines() if ln.strip()]
     sample = "\n".join(lines[:20]) if lines else csv_text[:4096]
 
-    # try to detect delimiter
+    # detect delimiter (fall back to tab/comma)
     delimiter = ","
     try:
         sniffer = csv.Sniffer()
@@ -232,23 +232,22 @@ def parse_csv_text(csv_text):
     except Exception:
         delimiter = "\t" if "\t" in sample else ","
 
-    # Attempt DictReader first (detect English or Spanish header names)
+    # Try DictReader first
     f = io.StringIO(csv_text)
     reader = csv.DictReader(f, delimiter=delimiter)
     fieldnames = reader.fieldnames or []
 
-    # Recognize common date header keywords (English/Spanish)
+    # helpers to decide parsing strategy
     has_date_header = any(any(k in (fn or "").lower() for k in ("date", "fecha", "draw")) for fn in fieldnames)
-    # Recognize Spanish combination-style header (COMBINACIÓN GANADORA) or many empty header cells
     looks_like_spanish_sheet = any("combin" in (fn or "").lower() for fn in fieldnames) or (sum(1 for fn in fieldnames if not fn or fn.strip() == "") > 2)
 
+    # Clean headered CSV path (supports English + Spanish headers)
     if has_date_header and not looks_like_spanish_sheet:
-        # Clean headered CSV path (DictReader) - extended Spanish keywords supported
         draws = []
         f2 = io.StringIO(csv_text)
         reader2 = csv.DictReader(f2, delimiter=delimiter)
         for row in reader2:
-            # find date column (support 'date' and 'fecha' and common alternates)
+            # locate date column
             date_str = None
             for k in row:
                 kl = (k or "").lower()
@@ -256,7 +255,6 @@ def parse_csv_text(csv_text):
                     date_str = (row[k] or "").strip()
                     break
             if not date_str:
-                # try a few alternates
                 for alt in ('draw', 'draw_date', 'date_played', 'fecha'):
                     if alt in row:
                         date_str = (row[alt] or "").strip()
@@ -269,22 +267,19 @@ def parse_csv_text(csv_text):
 
             mains = []
             bonus = []
-            # heuristics: extended to Spanish header words
+            # header-name heuristics: english + spanish tokens
             for k, v in row.items():
                 if not v:
                     continue
                 key = (k or "").lower()
                 val = (v or "").strip()
-                # main picks: english or spanish keywords
                 if re.search(r'ball|num|pick|winning|white|combinaci|ganadora|bola|nro|número|numero', key, re.I):
                     found = re.findall(r'\d{1,2}', val)
                     mains.extend([int(x) for x in found])
-                # bonus-ish: complementario, reintegro, comp.
                 elif re.search(r'bonus|comp|complementar|reint|reintegro|power|mega|joker', key, re.I):
                     found = re.findall(r'\d{1,2}', val)
                     bonus.extend([int(x) for x in found])
-
-            # fallback: if no explicit fields found, scan values left-to-right (same as before)
+            # fallback: scan row values left-to-right
             if not mains:
                 for v in row.values():
                     if v and re.search(r'\d', v):
@@ -292,99 +287,84 @@ def parse_csv_text(csv_text):
                         if len(found) >= 3:
                             mains = [int(x) for x in found[:7]]
                             break
-
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
         return draws
 
-    # If this looks like the Spanish Google Sheet (messy headers), parse by rows:
-    # assume first column is date, subsequent columns are numbers; optionally final column is Joker (long)
-    f3 = io.StringIO(csv_text)
-    reader3 = csv.reader(f3, delimiter=delimiter)
-    rows = [r for r in reader3 if any((c or "").strip() for c in r)]
-    if not rows:
-        return []
+    # If it's a messy Spanish sheet (many empty headers or 'COMBINACIÓN...'), parse row-oriented:
+    # 1st column = date, rest columns = numbers; final long Joker id ignored.
+    f_rows = io.StringIO(csv_text)
+    reader_rows = csv.reader(f_rows, delimiter=delimiter)
+    all_rows = [r for r in reader_rows if any((c or "").strip() for c in r)]
+    if all_rows:
+        header = all_rows[0]
+        # detect "spanish-like" header if FECHA present or combin... in header OR many empty headers
+        header_lower = " ".join([h.lower() for h in header if h])
+        if "fecha" in header_lower or "combin" in header_lower or (sum(1 for h in header if not h or h.strip() == "") > 2):
+            data_rows = all_rows[1:]
+            draws = []
+            for row in data_rows:
+                if not row:
+                    continue
+                date_str = (row[0] or "").strip()
+                date_obj = try_parse_date_any(date_str)
+                if not date_obj:
+                    joined = " ".join(row)
+                    m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', joined)
+                    if m:
+                        date_obj = try_parse_date_any(m.group(1))
+                    if not date_obj:
+                        continue
+                tail = [c.strip() for c in row[1:] if c is not None and str(c).strip() != ""]
+                # drop trailing joker-like long numeric token if present
+                if tail and re.fullmatch(r'\d{6,}', tail[-1]):
+                    tail = tail[:-1]
+                nums = []
+                for v in tail:
+                    found = re.findall(r'\d{1,2}', v)
+                    nums.extend([int(x) for x in found])
+                mains = nums[:6] if len(nums) >= 6 else nums
+                bonus = nums[6:8] if len(nums) > 6 else []
+                draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+            if draws:
+                return draws
 
-    # assume first row is header; data starts at second row
-    data_rows = rows[1:]
-    draws = []
-    for row in data_rows:
-        if not row:
-            continue
-        date_str = (row[0] or "").strip()
-        date_obj = try_parse_date_any(date_str)
-        if not date_obj:
-            # try to find date-like cell anywhere in the row
-            joined = " ".join(row)
-            m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', joined)
-            if m:
-                date_obj = try_parse_date_any(m.group(1))
-            if not date_obj:
-                continue
-        # take the remaining columns as numbers in order
-        tail = [c.strip() for c in row[1:] if c is not None and str(c).strip() != ""]
-        # drop trailing joker-like long numeric token if present
-        if tail and re.fullmatch(r'\d{6,}', tail[-1]):
-            tail = tail[:-1]
-        nums = []
-        for v in tail:
-            found = re.findall(r'\d{1,2}', v)
-            nums.extend([int(x) for x in found])
-        mains = nums[:6] if len(nums) >= 6 else nums
-        bonus = nums[6:8] if len(nums) > 6 else []
-        draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
-    return draws
-
-
-    # fallback: headerless table parsing (preserves your previous heuristics)
-        # fallback: headerless table parsing (preserves your previous heuristics)
+    # Headerless / tokenized fallback (handles whitespace-separated lines like "Mega Millions 12 5 2003 ...")
     f3 = io.StringIO(csv_text)
     reader3 = csv.reader(f3, delimiter=delimiter)
     draws = []
     for raw_row in reader3:
         if not raw_row:
             continue
-
-        # Normalize: if csv.reader produced a single column (likely whitespace-separated file),
-        # split that single cell on whitespace into tokens; otherwise trim empty columns.
+        # normalize tokens: if csv.reader returned one cell (common for space-delimited), split on whitespace
         if len(raw_row) == 1:
             tokens = re.split(r'\s+', raw_row[0].strip())
         else:
             tokens = [c.strip() for c in raw_row if c is not None and str(c).strip() != ""]
-
         if not tokens:
             continue
 
-        # Find first position where three consecutive tokens look like month/day/year or day/month/year
+        # find first index where three consecutive tokens are numeric and look like month/day/year or day/month/year
         date_idx = None
+        month = day = year = None
         for i in range(len(tokens) - 2):
             if tokens[i].isdigit() and tokens[i+1].isdigit() and tokens[i+2].isdigit():
-                # plausible year check (4 digits) or a reasonable month/day/year ordering
-                y = int(tokens[i+2])
-                m = int(tokens[i])
-                d = int(tokens[i+1])
-                if 1900 <= y <= 2100 and 1 <= m <= 12 and 1 <= d <= 31:
+                try:
+                    a, b, c = int(tokens[i]), int(tokens[i+1]), int(tokens[i+2])
+                except Exception:
+                    continue
+                # prefer (M D Y) where Y is 4-digit reasonable
+                if 1900 <= c <= 2100 and 1 <= a <= 12 and 1 <= b <= 31:
                     date_idx = i
-                    month, day, year = m, d, y
+                    month, day, year = a, b, c
                     break
-                # try alternate ordering (day, month, year)
-                y2 = int(tokens[i+2])
-                d2 = int(tokens[i])
-                m2 = int(tokens[i+1])
-                if 1900 <= y2 <= 2100 and 1 <= m2 <= 12 and 1 <= d2 <= 31:
+                # or (D M Y)
+                if 1900 <= c <= 2100 and 1 <= b <= 12 and 1 <= a <= 31:
                     date_idx = i
-                    month, day, year = m2, d2, y2
+                    month, day, year = b, a, c
                     break
 
-        if date_idx is None:
-            # Not the pattern we expect; fall back to joining and trying to find a date substring
-            joined = " ".join(tokens)
-            m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', joined)
-            if not m:
-                continue
-            # parse date fragment later in the "last-resort" handling; skip this pattern branch
-            # (we'll handle in later part of the loop)
-        else:
-            # game name is everything before date_idx — normalize (remove spaces/punctuation)
+        if date_idx is not None:
+            # game name is tokens[0:date_idx] — normalize to remove spaces/hyphens for matching
             game_raw = " ".join(tokens[:date_idx]).lower()
             game = re.sub(r'[\s\-_]', '', game_raw)
 
@@ -394,26 +374,25 @@ def parse_csv_text(csv_text):
             except Exception:
                 continue
 
-            # numeric tail is tokens after date_idx+3
             numeric_tail = tokens[date_idx+3:]
             numbers = []
             for n in numeric_tail:
                 if re.search(r'\d', str(n)):
-                    # allow 1-3 digit tokens (defensive)
                     found = re.findall(r'\d{1,3}', str(n))
                     numbers.extend([int(x) for x in found])
 
-            # GAME_SPECS same as before but make game matching tolerant (we normalized game)
+            # GAME_SPECS mapping (fallback slicing). Keep these keys lowercase & without spaces.
             GAME_SPECS = {
                 "powerball": {"main": 5, "bonus": 1},
                 "megamillions": {"main": 5, "bonus": 1},
                 "euromillions": {"main": 5, "bonus": 2},
                 "lotto": {"main": 6, "bonus": 0},
                 "thunderball": {"main": 5, "bonus": 1},
-                "set-for-life": {"main": 5, "bonus": 1},
-                "australia_powerball": {"main": 7, "bonus": 1}, 
+                "setforlife": {"main": 5, "bonus": 1},
+                "australia_powerball": {"main": 7, "bonus": 1},
                 "powerball_au": {"main": 7, "bonus": 1},
                 "spain_loterias": {"main": 6, "bonus": 2},
+                # add others as needed...
             }
             spec = None
             for k in GAME_SPECS:
@@ -442,11 +421,10 @@ def parse_csv_text(csv_text):
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
             continue
 
-        # --- existing last-resort parsing when date token wasn't found above ---
-        # (keep your original "joined" parsing & date regex code here; unchanged)
-        joined = ",".join(tokens)
+        # Last-resort: try to find a date snippet and extract last numeric tokens
+        joined = " ".join(tokens)
         date_obj = None
-        m = re.search(r'(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})', joined)
+        m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', joined)
         if m:
             for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
                 try:
@@ -474,6 +452,7 @@ def parse_csv_text(csv_text):
                 bonus = numbers[5:]
                 draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
     return draws
+
 
 
 def fetch_csv(draw_cfg):
