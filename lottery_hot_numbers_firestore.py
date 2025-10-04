@@ -479,6 +479,65 @@ def parse_csv_text(csv_text):
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
     return draws
 
+def parse_sa_lotto_csv(csv_text):
+    """
+    Robust parser for South Africa Lotto CSV rows like:
+      1\t11.03.2000\t3\t12\t21\t29\t38\t48\t11\tB\t2
+    or newer rows like:
+      2549\t11.06.2025\t38\t32\t43\t16\t46\t35\t50\tRNG\tRNG
+
+    Strategy:
+    - split row into parts
+    - parse date from parts[1]
+    - collect numeric tokens from parts[2:]
+    - mains = first 6 numeric tokens
+    - bonus = next numeric token if present
+    """
+    draws = []
+    if not csv_text:
+        return draws
+
+    lines = [ln for ln in csv_text.splitlines() if ln.strip()]
+    for line in lines:
+        parts = re.split(r'[\t,; ]+', line.strip())
+        if len(parts) < 3:
+            continue
+
+        # parse date from column 1 (index 1)
+        date_obj = try_parse_date_any(parts[1]) if len(parts) > 1 else None
+        if not date_obj:
+            # try to find a date anywhere on the line as a fallback
+            m = re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', line)
+            if m:
+                date_obj = try_parse_date_any(m.group(0))
+        if not date_obj:
+            continue
+
+        # gather numeric tokens after the date column (ignore draw number & other letters)
+        nums = []
+        for p in parts[2:]:
+            if not p:
+                continue
+            m = re.search(r'(\d{1,3})', p)   # allow up to 3 digits (some entries show 50+)
+            if m:
+                try:
+                    nums.append(int(m.group(1)))
+                except Exception:
+                    pass
+
+        # require at least 6 numeric tokens for mains
+        if len(nums) < 6:
+            continue
+
+        mains = nums[:6]
+        bonus = nums[6:7] if len(nums) >= 7 else []
+
+        draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+
+    return draws
+
+
+
 
 
 
@@ -519,7 +578,11 @@ def fetch_csv(draw_cfg):
                 txt = r.content.decode(enc, errors="replace")
             except Exception:
                 txt = r.content.decode("ISO-8859-1", errors="replace")
-            draws = parse_csv_text(txt)
+            if draw_cfg.get("page_id") == "sa_lotto":
+                draws = parse_sa_lotto_csv(txt)
+            else:
+                draws = parse_csv_text(txt)
+
             if draws:
                 print(f"[debug] CSV parsed OK from {u} (rows: {len(draws)})")
                 return draws
