@@ -489,105 +489,164 @@ def parse_csv_text(csv_text):
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
     return draws
 
-def scrape_lotteryguru_fortune_thursday(draw_cfg):
+def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
     """
-    Robust scraper for LotteryGuru Fortune Thursday history page.
-    Returns list of {"date": ISOdate, "main": [...], "bonus": []}
+    Robust LotteryGuru Fortune Thursday scraper with pagination.
+    Returns list of {"date": ISOdate, "main": [...], "bonus": []}, newest-first.
+    Fetches pages until we reach the cutoff (days_back) or lastPage.
     """
-    url = draw_cfg.get("html_url")
-    print(f"[debug] Scraping LotteryGuru (Fortune Thursday): {url}")
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        html = r.text
-        print(f"[debug] HTTP fetch OK, len(html)={len(html)}")
-        # small HTML sample for debugging
-        print("[debug] html sample:", html[:800].replace('\n',' '))
-        soup = BeautifulSoup(html, "html.parser")
-    except Exception as e:
-        print(f"[warning] scrape_lotteryguru_fortune_thursday fetch failed: {e}")
+    base_url = draw_cfg.get("html_url")
+    if not base_url:
         return []
+    print(f"[debug] scrape_lotteryguru_fortune_thursday: base_url={base_url}")
 
     draws = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
-    # Prefer a table that has a header cell containing 'Date' (case-insensitive)
-    table = None
-    for t in soup.find_all("table"):
-        header_text = " ".join([th.get_text(" ", strip=True).lower() for th in t.find_all("th")])
-        if "date" in header_text or "draw" in header_text:
-            table = t
+    # cutoff date (inclusive)
+    cutoff = datetime.utcnow().date() - timedelta(days=days_back)
+
+    # helper to parse a single page
+    def parse_page(html):
+        page_draws = []
+        soup = BeautifulSoup(html, "html.parser")
+
+        # every result block is a div with class lg-line
+        lines = soup.select("div.lg-line")
+        for line in lines:
+            # find the date: there are two .lg-date columns; the second has the actual date & year
+            date_nodes = line.select("div.lg-date")
+            date_obj = None
+            if date_nodes:
+                # try second .lg-date (right aligned) with strong containing "02 Oct" and year after it
+                if len(date_nodes) >= 2:
+                    right = date_nodes[1]
+                    strong = right.find("strong")
+                    year_text = right.get_text(" ", strip=True)
+                    if strong:
+                        # build "02 Oct 2025" by combining strong + remaining text
+                        day_month = strong.get_text(" ", strip=True)
+                        # get text after the strong tag (usually the year)
+                        after = strong.next_sibling
+                        if after:
+                            # sometimes next_sibling is a newline/text containing year
+                            year = str(after).strip()
+                        else:
+                            # fallback: take right.text and remove the strong text
+                            year = year_text.replace(day_month, "").strip()
+                        candidate = f"{day_month} {year}".strip()
+                        date_obj = try_parse_date_any(candidate)
+                # fallback: try to find any date within the whole line
+            if not date_obj:
+                # try to find any dd/mm/yyyy or dd MMM yyyy in the line text
+                txt = line.get_text(" ", strip=True)
+                m = re.search(r'(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', txt)
+                if m:
+                    date_obj = try_parse_date_any(m.group(1))
+
+            if not date_obj:
+                continue
+
+            # get numbers from ul.lg-numbers-small.game-number > li.lg-number
+            nums = []
+            ul = line.select_one("ul.lg-numbers-small.game-number")
+            if ul:
+                for li in ul.select("li.lg-number"):
+                    t = li.get_text(" ", strip=True)
+                    if re.search(r'\d', t):
+                        try:
+                            nums.append(int(re.search(r'\d{1,3}', t).group(0)))
+                        except Exception:
+                            pass
+            else:
+                # fallback: collect all numeric tokens in the line and take last 5
+                found = [int(x) for x in re.findall(r'\d{1,3}', line.get_text(" ", strip=True))]
+                # remove year token(s)
+                found = [n for n in found if n != date_obj.year]
+                nums = found[-5:] if len(found) >= 5 else found
+
+            if len(nums) < 5:
+                continue
+
+            # ensure numbers are integers and trimmed to 5
+            mains = nums[:5]
+            page_draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": []})
+
+        # also return pageInfo attributes for pagination control if present
+        page_info = {}
+        pi = soup.find(id="pageInfo")
+        if pi:
+            try:
+                page_info["pageNumber"] = int(pi.get("pageNumber", 1))
+                page_info["pageSize"] = int(pi.get("pageSize", 10))
+                page_info["lastPage"] = int(pi.get("lastPage", 1))
+                page_info["totalElementCount"] = int(pi.get("totalElementCount", 0))
+            except Exception:
+                pass
+
+        return page_draws, page_info
+
+    # first request to discover pagination meta
+    page = 1
+    last_page = None
+    while True:
+        # build page URL (LotteryGuru uses ?page=N)
+        url = base_url if "?page=" in base_url else base_url.rstrip("/") + (f"?page={page}" if page > 1 else "")
+        try:
+            print(f"[debug] fetch page {page}: {url}")
+            r = session.get(url, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            page_draws, page_info = parse_page(r.text)
+            print(f"[debug] page {page} parsed draws: {len(page_draws)}")
+            if page_info.get("lastPage"):
+                last_page = page_info["lastPage"]
+        except Exception as e:
+            print(f"[warning] fetch/parse failed for page {page}: {e}")
             break
 
-    rows = []
-    if table:
-        rows = table.find_all("tr")
-    else:
-        # fallback: try rows anywhere (good to catch list/table markup variations)
-        rows = soup.find_all("tr")
-        if not rows:
-            # if no tr rows, also attempt to find list items with date-like patterns
-            lis = soup.find_all("li")
-            for li in lis:
-                text = li.get_text(" ", strip=True)
-                if re.search(r'\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4}', text) or re.search(r'\w+\s+\d{1,2},\s*\d{4}', text):
-                    rows.append(li)
+        # append page_draws (they are newest-first on each page)
+        draws.extend(page_draws)
 
-    for el in rows:
-        text = el.get_text(" ", strip=True)
-        if not text or len(re.findall(r'\d{1,2}', text)) < 5:
+        # if any draw on this page is older than cutoff, we can stop (we still include draws on the page that are newer)
+        # find the oldest date parsed on this page
+        oldest_on_page = None
+        try:
+            dates_on_page = [datetime.fromisoformat(d["date"]).date() for d in page_draws]
+            if dates_on_page:
+                oldest_on_page = min(dates_on_page)
+        except Exception:
+            oldest_on_page = None
+
+        if oldest_on_page and oldest_on_page < cutoff:
+            print(f"[debug] reached cutoff on page {page} (oldest_on_page={oldest_on_page} < cutoff={cutoff})")
+            break
+
+        # advance page or stop if no more pages
+        page += 1
+        if last_page and page > last_page:
+            break
+        # safety: cap number of pages to avoid infinite loop
+        if page > 50:
+            print("[warning] reached page cap (50), stopping")
+            break
+        # short sleep to be polite
+        time.sleep(0.25)
+
+    # dedupe by date+numbers (sometimes duplicates across pages) and sort newest-first
+    seen = set()
+    deduped = []
+    for d in draws:
+        key = (d["date"], tuple(d["main"]))
+        if key in seen:
             continue
+        seen.add(key)
+        deduped.append(d)
 
-        # Try to get a date from any cell first
-        date_obj = None
-        nums = []
-        # If table-like, iterate cells
-        cells = el.find_all(['td', 'th'])
-        if cells:
-            for td in cells:
-                txt = td.get_text(" ", strip=True)
-                if not date_obj:
-                    date_obj = try_parse_date_any(txt)
-                    if date_obj:
-                        continue
-                # collect numeric groups (allow up to 3 digits)
-                for f in re.findall(r'\d{1,3}', txt):
-                    try:
-                        nums.append(int(f))
-                    except Exception:
-                        pass
-        else:
-            # non-table element (li/div)
-            # get numbers and attempt to find date in the text
-            m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', text)
-            if m:
-                date_obj = try_parse_date_any(m.group(1))
-            for f in re.findall(r'\d{1,3}', text):
-                try:
-                    nums.append(int(f))
-                except Exception:
-                    pass
+    deduped.sort(key=lambda x: x["date"], reverse=True)
+    print(f"[debug] scrape_lotteryguru_fortune_thursday: total parsed draws after paging={len(deduped)}")
+    return deduped
 
-        if not date_obj:
-            # last-chance: try to find a date anywhere in the text
-            m2 = re.search(r'(\w+\s+\d{1,2},\s*\d{4})', text)
-            if m2:
-                date_obj = try_parse_date_any(m2.group(1))
-        if not date_obj:
-            continue
-
-        # remove tokens that are the year
-        nums = [n for n in nums if n != date_obj.year]
-
-        # Heuristic: the winning numbers are likely the last 5 numeric tokens
-        if len(nums) >= 5:
-            mains = nums[-5:]
-            draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": []})
-
-    # sort newest-first (consistent with your script)
-    draws.sort(key=lambda d: d["date"], reverse=True)
-
-    print(f"[debug] scrape_lotteryguru_fortune_thursday: parsed {len(draws)} draws, sample: {draws[:3]}")
-    return draws
 
 
 
