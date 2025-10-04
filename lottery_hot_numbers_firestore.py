@@ -481,17 +481,8 @@ def parse_csv_text(csv_text):
 
 def parse_sa_lotto_csv(csv_text):
     """
-    Robust parser for South Africa Lotto CSV rows like:
-      1\t11.03.2000\t3\t12\t21\t29\t38\t48\t11\tB\t2
-    or newer rows like:
-      2549\t11.06.2025\t38\t32\t43\t16\t46\t35\t50\tRNG\tRNG
-
-    Strategy:
-    - split row into parts
-    - parse date from parts[1]
-    - collect numeric tokens from parts[2:]
-    - mains = first 6 numeric tokens
-    - bonus = next numeric token if present
+    Robust parser for South Africa Lotto CSV (handles dd.mm.YYYY and other variants).
+    Returns list of {"date": ISOdate, "main": [...], "bonus": [...]}
     """
     draws = []
     if not csv_text:
@@ -499,33 +490,53 @@ def parse_sa_lotto_csv(csv_text):
 
     lines = [ln for ln in csv_text.splitlines() if ln.strip()]
     for line in lines:
-        parts = re.split(r'[\t,; ]+', line.strip())
+        # Split on tabs/commas/spaces; keep tokens
+        parts = re.split(r'[\t,]+|\s{2,}|\s+', line.strip())
         if len(parts) < 3:
             continue
 
-        # parse date from column 1 (index 1)
-        date_obj = try_parse_date_any(parts[1]) if len(parts) > 1 else None
+        # Attempt to parse date from parts[1] (most files use this)
+        date_obj = None
+        if len(parts) > 1:
+            p = parts[1].strip()
+            # common dot format: 11.03.2000
+            m_dot = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$', p)
+            if m_dot:
+                try:
+                    date_obj = datetime.strptime(p, "%d.%m.%Y").date()
+                except Exception:
+                    date_obj = None
+            else:
+                # try general parser
+                date_obj = try_parse_date_any(p)
+
+        # fallback: try to find a dd.mm.YYYY anywhere on the line
         if not date_obj:
-            # try to find a date anywhere on the line as a fallback
-            m = re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', line)
-            if m:
-                date_obj = try_parse_date_any(m.group(0))
+            m_any = re.search(r'(\d{1,2}\.\d{1,2}\.\d{4})', line)
+            if m_any:
+                try:
+                    date_obj = datetime.strptime(m_any.group(1), "%d.%m.%Y").date()
+                except Exception:
+                    date_obj = try_parse_date_any(m_any.group(1))
+
         if not date_obj:
+            # nothing we can do for this line
             continue
 
-        # gather numeric tokens after the date column (ignore draw number & other letters)
+        # Collect numeric tokens after the date column (ignore draw number at parts[0])
         nums = []
-        for p in parts[2:]:
-            if not p:
+        for token in parts[2:]:
+            if not token:
                 continue
-            m = re.search(r'(\d{1,3})', p)   # allow up to 3 digits (some entries show 50+)
+            # find first numeric group (allow up to 3 digits)
+            m = re.search(r'(\d{1,3})', token)
             if m:
                 try:
                     nums.append(int(m.group(1)))
                 except Exception:
                     pass
 
-        # require at least 6 numeric tokens for mains
+        # require at least 6 mains
         if len(nums) < 6:
             continue
 
@@ -534,7 +545,14 @@ def parse_sa_lotto_csv(csv_text):
 
         draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
 
+    # Debug: show a small sample in logs so you can verify parsing
+    if draws:
+        print(f"[debug] parse_sa_lotto_csv: parsed {len(draws)} rows, sample: {draws[:3]}")
+    else:
+        print("[debug] parse_sa_lotto_csv: parsed 0 rows (no valid lines)")
+
     return draws
+
 
 
 
@@ -580,8 +598,10 @@ def fetch_csv(draw_cfg):
                 txt = r.content.decode("ISO-8859-1", errors="replace")
             if draw_cfg.get("page_id") == "sa_lotto":
                 draws = parse_sa_lotto_csv(txt)
+                print(f"[debug] fetch_csv: sa_lotto parsed {len(draws)} rows from {u}")
             else:
                 draws = parse_csv_text(txt)
+
 
             if draws:
                 print(f"[debug] CSV parsed OK from {u} (rows: {len(draws)})")
