@@ -71,6 +71,13 @@ LOTTERIES = {
         "csv_url": None,
         "page_id": "lotto-hotpicks",
     },
+    "spain_loterias_sheet": {
+    "html_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1",
+    "csv_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1&single=true&output=csv",
+    "page_id": "spain_loterias",
+    "note": "Public Google Sheet published as CSV — parser now recognizes FECHA/COMBINACIÓN GANADORA/COMP./R./JOKER"
+    },
+
     # --- Australia ---
     "australia_powerball": {
         "html_url": "https://www.lotterywest.wa.gov.au/games/powerball",
