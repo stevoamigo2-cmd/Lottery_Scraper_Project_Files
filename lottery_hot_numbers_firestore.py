@@ -406,6 +406,9 @@ def parse_csv_text(csv_text):
                 "powerball_au": {"main": 7, "bonus": 1},
                 "spain_loterias": {"main": 6, "bonus": 2},
                 "south_africa_lotto": {"main": 6, "bonus": 1},
+                "ghana_fortune_thursday": {"main": 5, "bonus": 0},
+                "ghanafortunethursday": {"main": 5, "bonus": 0},
+                "gh-fortune-thursday": {"main": 5, "bonus": 0},
 
                 # add others as needed...
             }
