@@ -451,25 +451,26 @@ def parse_csv_text(csv_text):
                 mains = numbers[:5]
                 bonus = numbers[5:]
                 draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
-                # If nothing parsed yet, try headerless tab-separated numeric layout (e.g. SA Lotto)
-if not draws and lines and re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', lines[0]):
-    draws = []
-    for line in lines:
-        parts = re.split(r'[\t,; ]+', line.strip())
-        if len(parts) < 8:
-            continue
-        date_match = re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', line)
-        if not date_match:
-            continue
-        date_str = date_match.group(0)
-        date_obj = try_parse_date_any(date_str)
-        if not date_obj:
-            continue
-        # Extract numbers between date and final column
-        nums = [int(x) for x in parts if re.match(r'^\d+$', x)]
-        mains, bonus = nums[:6], nums[6:7]  # 6 main, 1 bonus
-        draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+                    # Last-resort: try headerless tab-separated numeric layout (e.g. SA Lotto)
+    if not draws and lines and re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', lines[0]):
+        draws = []
+        for line in lines:
+            parts = re.split(r'[\t,; ]+', line.strip())
+            if len(parts) < 8:
+                continue
+            date_match = re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', line)
+            if not date_match:
+                continue
+            date_str = date_match.group(0)
+            date_obj = try_parse_date_any(date_str)
+            if not date_obj:
+                continue
+            # Extract numbers between date and final column
+            nums = [int(x) for x in parts if re.match(r'^\d+$', x)]
+            mains, bonus = nums[:6], nums[6:7]  # 6 main, 1 bonus
+            draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
     return draws
+
 
 
 
