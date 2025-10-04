@@ -392,6 +392,7 @@ def parse_csv_text(csv_text):
                 "australia_powerball": {"main": 7, "bonus": 1},
                 "powerball_au": {"main": 7, "bonus": 1},
                 "spain_loterias": {"main": 6, "bonus": 2},
+                "south_africa_lotto": {"main": 6, "bonus": 1},
                 # add others as needed...
             }
             spec = None
@@ -451,6 +452,54 @@ def parse_csv_text(csv_text):
                 mains = numbers[:5]
                 bonus = numbers[5:]
                 draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+
+
+    # If nothing parsed yet, try headerless tab-separated numeric layout (e.g. SA Lotto)
+if not draws and lines and re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', lines[0]):
+    sa_draws = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # split on tabs or common separators; SA file you showed is tab-separated
+        parts = re.split(r'[\t,; ]+', line)
+        # require at least: draw_no, date, 6+ numbers
+        if len(parts) < 8:
+            continue
+        # find date fragment like 21.08.2024
+        date_match = re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', line)
+        if not date_match:
+            continue
+        date_str = date_match.group(0)
+        date_obj = try_parse_date_any(date_str)
+        if not date_obj:
+            continue
+        # numeric tokens in the row (skip the draw id and trailing labels)
+        nums = [int(x) for x in parts if re.fullmatch(r'\d{1,3}', x)]
+        if len(nums) < 6:
+            continue
+        # assume 6 mains then 1 bonus (if present)
+        mains = nums[2:8] if len(nums) >= 8 else nums[2:8]  # nums[0]=draw_no, nums[1]=day/month/year token
+        # fallback if parsed differently: take the first 6 after the date
+        if not mains or len(mains) < 6:
+            # find index of the date token in parts and take the next numeric tokens
+            try:
+                idx = next(i for i,p in enumerate(parts) if re.fullmatch(r'\d{1,2}\.\d{1,2}\.\d{4}', p))
+            except StopIteration:
+                idx = None
+            if idx is not None:
+                tail_nums = [int(p) for p in parts[idx+1:] if re.fullmatch(r'\d{1,3}', p)]
+                mains = tail_nums[:6]
+                bonus = tail_nums[6:7]
+            else:
+                bonus = []
+        else:
+            bonus = mains[6:7] if len(mains) > 6 else []
+            mains = mains[:6]
+        sa_draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+    if sa_draws:
+        print(f"[debug] parse_csv_text: detected SA-style tab-separated CSV, parsed {len(sa_draws)} draws")
+        return sa_draws
     return draws
 
 
