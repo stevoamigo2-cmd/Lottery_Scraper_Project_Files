@@ -336,35 +336,74 @@ def parse_csv_text(csv_text):
 
 
     # fallback: headerless table parsing (preserves your previous heuristics)
+        # fallback: headerless table parsing (preserves your previous heuristics)
     f3 = io.StringIO(csv_text)
     reader3 = csv.reader(f3, delimiter=delimiter)
     draws = []
-    for row in reader3:
-        if not row:
-            continue
-        # trim and remove empty columns
-        row = [c.strip() for c in row if c is not None and str(c).strip() != ""]
-        if not row:
+    for raw_row in reader3:
+        if not raw_row:
             continue
 
-        # Pattern: GameName, Month, Day, Year, num1, num2, ...
-        if len(row) >= 5 and not row[0].isdigit() and not re.match(r'^\d{4}(-\d{2}-\d{2})?$', row[0]):
-            game = row[0].lower()
+        # Normalize: if csv.reader produced a single column (likely whitespace-separated file),
+        # split that single cell on whitespace into tokens; otherwise trim empty columns.
+        if len(raw_row) == 1:
+            tokens = re.split(r'\s+', raw_row[0].strip())
+        else:
+            tokens = [c.strip() for c in raw_row if c is not None and str(c).strip() != ""]
+
+        if not tokens:
+            continue
+
+        # Find first position where three consecutive tokens look like month/day/year or day/month/year
+        date_idx = None
+        for i in range(len(tokens) - 2):
+            if tokens[i].isdigit() and tokens[i+1].isdigit() and tokens[i+2].isdigit():
+                # plausible year check (4 digits) or a reasonable month/day/year ordering
+                y = int(tokens[i+2])
+                m = int(tokens[i])
+                d = int(tokens[i+1])
+                if 1900 <= y <= 2100 and 1 <= m <= 12 and 1 <= d <= 31:
+                    date_idx = i
+                    month, day, year = m, d, y
+                    break
+                # try alternate ordering (day, month, year)
+                y2 = int(tokens[i+2])
+                d2 = int(tokens[i])
+                m2 = int(tokens[i+1])
+                if 1900 <= y2 <= 2100 and 1 <= m2 <= 12 and 1 <= d2 <= 31:
+                    date_idx = i
+                    month, day, year = m2, d2, y2
+                    break
+
+        if date_idx is None:
+            # Not the pattern we expect; fall back to joining and trying to find a date substring
+            joined = " ".join(tokens)
+            m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', joined)
+            if not m:
+                continue
+            # parse date fragment later in the "last-resort" handling; skip this pattern branch
+            # (we'll handle in later part of the loop)
+        else:
+            # game name is everything before date_idx — normalize (remove spaces/punctuation)
+            game_raw = " ".join(tokens[:date_idx]).lower()
+            game = re.sub(r'[\s\-_]', '', game_raw)
+
+            # build date object
             try:
-                month = int(row[1])
-                day = int(row[2])
-                year = int(row[3])
                 date_obj = datetime(year, month, day).date()
             except Exception:
                 continue
 
-            numeric_tail = [c for c in row[4:] if re.search(r'\d', c)]
+            # numeric tail is tokens after date_idx+3
+            numeric_tail = tokens[date_idx+3:]
             numbers = []
             for n in numeric_tail:
-                found = re.findall(r'\d{1,2}', n)
-                numbers.extend([int(x) for x in found])
+                if re.search(r'\d', str(n)):
+                    # allow 1-3 digit tokens (defensive)
+                    found = re.findall(r'\d{1,3}', str(n))
+                    numbers.extend([int(x) for x in found])
 
-            # use same GAME_SPECS mapping as before
+            # GAME_SPECS same as before but make game matching tolerant (we normalized game)
             GAME_SPECS = {
                 "powerball": {"main": 5, "bonus": 1},
                 "megamillions": {"main": 5, "bonus": 1},
@@ -401,38 +440,41 @@ def parse_csv_text(csv_text):
                     mains = numbers[:5]
                     bonus = numbers[5:]
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
-        else:
-            # last-resort parsing when rows start with date-like values
-            joined = ",".join(row)
-            date_obj = None
-            m = re.search(r'(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})', joined)
-            if m:
-                for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
-                    try:
-                        date_obj = datetime.strptime(m.group(1), fmt).date()
-                        break
-                    except Exception:
-                        pass
-            if not date_obj:
-                parts = row[:4]
+            continue
+
+        # --- existing last-resort parsing when date token wasn't found above ---
+        # (keep your original "joined" parsing & date regex code here; unchanged)
+        joined = ",".join(tokens)
+        date_obj = None
+        m = re.search(r'(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})', joined)
+        if m:
+            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
                 try:
-                    if len(parts) >= 3 and all(p.isdigit() for p in parts[:3]):
-                        try:
-                            date_obj = datetime(int(parts[2]), int(parts[0]), int(parts[1])).date()
-                        except Exception:
-                            date_obj = datetime(int(parts[0]), int(parts[1]), int(parts[2])).date()
+                    date_obj = datetime.strptime(m.group(1), fmt).date()
+                    break
                 except Exception:
-                    date_obj = None
-            if not date_obj:
-                continue
-            nums = re.findall(r'\d{1,2}', joined)
-            if len(nums) >= 6:
-                numbers = [int(x) for x in nums[-8:]]
-                if len(numbers) >= 6:
-                    mains = numbers[:5]
-                    bonus = numbers[5:]
-                    draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+                    pass
+        if not date_obj:
+            parts = tokens[:4]
+            try:
+                if len(parts) >= 3 and all(p.isdigit() for p in parts[:3]):
+                    try:
+                        date_obj = datetime(int(parts[2]), int(parts[0]), int(parts[1])).date()
+                    except Exception:
+                        date_obj = datetime(int(parts[0]), int(parts[1]), int(parts[2])).date()
+            except Exception:
+                date_obj = None
+        if not date_obj:
+            continue
+        nums = re.findall(r'\d{1,2}', joined)
+        if len(nums) >= 6:
+            numbers = [int(x) for x in nums[-8:]]
+            if len(numbers) >= 6:
+                mains = numbers[:5]
+                bonus = numbers[5:]
+                draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
     return draws
+
 
 def fetch_csv(draw_cfg):
     """
