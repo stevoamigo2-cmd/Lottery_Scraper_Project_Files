@@ -95,6 +95,7 @@ LOTTERIES = {
     "australia_powerball": {
         "html_url": "https://www.lotterywest.wa.gov.au/games/powerball",
         "csv_url": "https://api.lotterywest.wa.gov.au/api/v1/games/5132/results-csv",
+        "page_id": "australia_powerball",
         "note": "Official CSV endpoint (Lotterywest API).",
         "source": "Lotterywest download page / API."
     }
@@ -210,10 +211,27 @@ def scrape_html(draw_cfg):
         if not date_obj:
             continue
         # extract numbers (first up to 8)
-        nums = [int(x) for x in re.findall(r'\d{1,2}', text)]
-        mains = nums[:5]
-        bonus = nums[5:8]
+                # extract numbers (all numeric tokens)
+        nums = [int(x) for x in re.findall(r'\d{1,3}', text)]
+        # remove any stray year tokens (simple heuristic)
+        nums = [n for n in nums if n != date_obj.year]
+
+        # If we have a game spec for this page, use it to slice mains/bonus
+        pid = draw_cfg.get("page_id")
+        spec = GAME_SPECS.get(pid) if pid else None
+
+        if spec:
+            main_count = spec.get("main", 5)
+            bonus_count = spec.get("bonus", 0)
+            mains = nums[:main_count]
+            bonus = nums[main_count: main_count + bonus_count]
+        else:
+            # original heuristic fallback (keeps current behaviour for unknown games)
+            mains = nums[:5]
+            bonus = nums[5:8]
+
         draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+
 
     print(f"[debug] scrape_html parsed draws: {len(draws)}")
     return draws
@@ -396,13 +414,13 @@ def parse_csv_text(csv_text):
 
             # GAME_SPECS mapping (fallback slicing). Keep these keys lowercase & without spaces.
             GAME_SPECS = {
+                "australia_powerball": {"main": 7, "bonus": 1},
                 "powerball": {"main": 5, "bonus": 1},
                 "megamillions": {"main": 5, "bonus": 1},
                 "euromillions": {"main": 5, "bonus": 2},
                 "lotto": {"main": 6, "bonus": 0},
                 "thunderball": {"main": 5, "bonus": 1},
                 "setforlife": {"main": 5, "bonus": 1},
-                "australia_powerball": {"main": 7, "bonus": 1},
                 "powerball_au": {"main": 7, "bonus": 1},
                 "spain_loterias": {"main": 6, "bonus": 2},
                 "south_africa_lotto": {"main": 6, "bonus": 1},
