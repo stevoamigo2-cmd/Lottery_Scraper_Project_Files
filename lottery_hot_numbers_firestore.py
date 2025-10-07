@@ -26,7 +26,8 @@ DAYS_BACK = int(os.environ.get("DAYS_BACK", "60"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
 
 # NOTE: csv_url values are examples — confirm working CSV download links for your target host.
-# Many official lottery sites or state lottery portals expose CSV downloads, but paths can change.
+# Many official lottery sites or state lottery portals expose CSV downloads, but paths can change
+
 LOTTERIES = {
     "euromillions": {
         "html_url": "https://www.national-lottery.co.uk/results/euromillions/draw-history",
@@ -89,9 +90,6 @@ LOTTERIES = {
     "page_id": "ghana_fortune_thursday",
     "note": "Scraped from LotteryGuru history page; parsed into 5-number draws."
     },
-
-
-    # --- Australia ---
     "australia_powerball": {
         "html_url": "https://www.lotterywest.wa.gov.au/games/powerball",
         "csv_url": "https://api.lotterywest.wa.gov.au/api/v1/games/5132/results-csv",
@@ -100,6 +98,24 @@ LOTTERIES = {
         "source": "Lotterywest download page / API."
     }
 }
+
+GAME_SPECS = {
+                "australia_powerball": {"main": 7, "bonus": 1},
+                "powerball": {"main": 5, "bonus": 1},
+                "megamillions": {"main": 5, "bonus": 1},
+                "euromillions": {"main": 5, "bonus": 2},
+                "lotto": {"main": 6, "bonus": 0},
+                "thunderball": {"main": 5, "bonus": 1},
+                "set-for-life": {"main": 5, "bonus": 1},
+                "powerball_au": {"main": 7, "bonus": 1},
+                "spain_loterias": {"main": 6, "bonus": 2},
+                "south_africa_lotto": {"main": 6, "bonus": 1},
+                "ghana_fortune_thursday": {"main": 5, "bonus": 0},
+                "ghanafortunethursday": {"main": 5, "bonus": 0},
+                "gh-fortune-thursday": {"main": 5, "bonus": 0},
+
+                # add others as needed...
+            }
 
 # ------------ Helpers ------------
 def fetch_url(url):
@@ -412,24 +428,7 @@ def parse_csv_text(csv_text):
                     found = re.findall(r'\d{1,3}', str(n))
                     numbers.extend([int(x) for x in found])
 
-            # GAME_SPECS mapping (fallback slicing). Keep these keys lowercase & without spaces.
-            GAME_SPECS = {
-                "australia_powerball": {"main": 7, "bonus": 1},
-                "powerball": {"main": 5, "bonus": 1},
-                "megamillions": {"main": 5, "bonus": 1},
-                "euromillions": {"main": 5, "bonus": 2},
-                "lotto": {"main": 6, "bonus": 0},
-                "thunderball": {"main": 5, "bonus": 1},
-                "setforlife": {"main": 5, "bonus": 1},
-                "powerball_au": {"main": 7, "bonus": 1},
-                "spain_loterias": {"main": 6, "bonus": 2},
-                "south_africa_lotto": {"main": 6, "bonus": 1},
-                "ghana_fortune_thursday": {"main": 5, "bonus": 0},
-                "ghanafortunethursday": {"main": 5, "bonus": 0},
-                "gh-fortune-thursday": {"main": 5, "bonus": 0},
-
-                # add others as needed...
-            }
+            
             spec = None
             for k in GAME_SPECS:
                 if game.startswith(k):
