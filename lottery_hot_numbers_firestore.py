@@ -73,22 +73,22 @@ LOTTERIES = {
         "page_id": "lotto-hotpicks",
     },
     "spain_loterias_sheet": {
-    "html_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1",
-    "csv_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1&single=true&output=csv",
-    "page_id": "spain_loterias",
-    "note": "Public Google Sheet published as CSV — parser now recognizes FECHA/COMBINACIÓN GANADORA/COMP./R./JOKER"
+        "html_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1",
+        "csv_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1&single=true&output=csv",
+        "page_id": "spain_loterias",
+        "note": "Public Google Sheet published as CSV — parser now recognizes FECHA/COMBINACIÓN GANADORA/COMP./R./JOKER"
     },
     "south_africa_lotto": {
-    "html_url": "https://www.africanlottery.net/lotto-results",  # optional, can be used for HTML fallback
-    "csv_url": "https://www.africanlottery.net/download/sa_lotto.csv",
-    "page_id": "sa_lotto",
-    "note": "Official CSV download for South Africa Lotto."
+        "html_url": "https://www.africanlottery.net/lotto-results",  # optional, can be used for HTML fallback
+        "csv_url": "https://www.africanlottery.net/download/sa_lotto.csv",
+        "page_id": "sa_lotto",
+        "note": "Official CSV download for South Africa Lotto."
     },
     "ghana_fortune_thursday": {
-    "html_url": "https://lotteryguru.com/ghana-lottery-results/gh-fortune-thursday/gh-fortune-thursday-results-history",
-    "csv_url": None,
-    "page_id": "ghana_fortune_thursday",
-    "note": "Scraped from LotteryGuru history page; parsed into 5-number draws."
+        "html_url": "https://lotteryguru.com/ghana-lottery-results/gh-fortune-thursday/gh-fortune-thursday-results-history",
+        "csv_url": None,
+        "page_id": "ghana_fortune_thursday",
+        "note": "Scraped from LotteryGuru history page; parsed into 5-number draws."
     },
     "australia_powerball": {
         "html_url": "https://www.lotterywest.wa.gov.au/games/powerball",
@@ -100,22 +100,34 @@ LOTTERIES = {
 }
 
 GAME_SPECS = {
-                "australia_powerball": {"main": 7, "bonus": 1},
-                "powerball": {"main": 5, "bonus": 1},
-                "megamillions": {"main": 5, "bonus": 1},
-                "euromillions": {"main": 5, "bonus": 2},
-                "lotto": {"main": 6, "bonus": 0},
-                "thunderball": {"main": 5, "bonus": 1},
-                "set-for-life": {"main": 5, "bonus": 1},
-                "powerball_au": {"main": 7, "bonus": 1},
-                "spain_loterias": {"main": 6, "bonus": 2},
-                "south_africa_lotto": {"main": 6, "bonus": 1},
-                "ghana_fortune_thursday": {"main": 5, "bonus": 0},
-                "ghanafortunethursday": {"main": 5, "bonus": 0},
-                "gh-fortune-thursday": {"main": 5, "bonus": 0},
+    "australia_powerball": {"main": 7, "bonus": 1},
+    "powerball": {"main": 5, "bonus": 1},
+    "megamillions": {"main": 5, "bonus": 1},
+    "euromillions": {"main": 5, "bonus": 2},
+    "lotto": {"main": 6, "bonus": 0},
+    "thunderball": {"main": 5, "bonus": 1},
+    "set-for-life": {"main": 5, "bonus": 1},
+    "powerball_au": {"main": 7, "bonus": 1},
+    "spain_loterias": {"main": 6, "bonus": 2},
+    "south_africa_lotto": {"main": 6, "bonus": 1},
+    "ghana_fortune_thursday": {"main": 5, "bonus": 0},
+    "ghanafortunethursday": {"main": 5, "bonus": 0},
+    "gh-fortune-thursday": {"main": 5, "bonus": 0},
+}
 
-                # add others as needed...
-            }
+# enforce per-game numeric ranges for parsed balls (module-level)
+GAME_RANGES = {
+    "australia_powerball": {"main_max": 35, "bonus_max": 20},
+    "powerball": {"main_max": 69, "bonus_max": 26},
+    "megamillions": {"main_max": 70, "bonus_max": 25},
+    "spain_loterias": {"main_max": 49, "bonus_max": 9},
+}
+
+# Per-game override for how many "top" items to return
+HOT_TOP_N = {
+    "australia_powerball": {"top_main": 10, "top_bonus": 10},
+}
+
 
 # ------------ Helpers ------------
 def fetch_url(url):
@@ -123,13 +135,16 @@ def fetch_url(url):
     r.raise_for_status()
     return r.text
 
+
 def fetch_soup(url):
     txt = fetch_url(url)
     return BeautifulSoup(txt, "html.parser")
 
+
 def extract_numbers_from_span(text):
     nums = re.findall(r'\d{1,2}', text)
     return [int(n) for n in nums]
+
 
 def try_parse_date_any(text):
     text = (text or "").strip()
@@ -140,9 +155,9 @@ def try_parse_date_any(text):
     fmts = (
         "%d %b %Y", "%d %B %Y", "%d/%m/%Y", "%Y-%m-%d",
         "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y",
-        "%b %d, %Y", "%B %d, %Y",         # "Jan 14, 2025" / "January 14, 2025"
-        "%a %d %b %Y", "%A %d %B %Y",     # "Sat 14 Jun 2025" / "Saturday 14 June 2025"
-        "%a, %b %d, %Y", "%A, %B %d, %Y"  # "Sat, Jun 14, 2025"
+        "%b %d, %Y", "%B %d, %Y",
+        "%a %d %b %Y", "%A %d %B %Y",
+        "%a, %b %d, %Y", "%A, %B %d, %Y"
     )
     for fmt in fmts:
         try:
@@ -171,18 +186,52 @@ def try_parse_date_any(text):
     return None
 
 
+def _enforce_ranges(mains, bonus, page_id=None):
+    """
+    Filter mains/bonus by GAME_RANGES for page_id (module-level).
+    Returns filtered (mains, bonus).
+    """
+    ranges = GAME_RANGES.get(page_id) or {}
+    if not ranges:
+        return mains, bonus
+    main_max = ranges.get("main_max", 9999)
+    bonus_max = ranges.get("bonus_max", 9999)
+    mains = [n for n in mains if isinstance(n, int) and 1 <= n <= main_max]
+    bonus = [n for n in bonus if isinstance(n, int) and 1 <= n <= bonus_max]
+    return mains, bonus
+
+
+def _normalize_and_append(draws_list, date_obj, mains, bonus, page_id=None):
+    """
+    Normalize mains/bonus, enforce ranges for page_id, and append a draw dict
+    onto draws_list (explicit list arg so this works in any scope).
+    """
+    if isinstance(mains, int):
+        mains = [mains]
+    if isinstance(bonus, int):
+        bonus = [bonus]
+
+    mains = [int(n) for n in mains if isinstance(n, int) and n >= 1]
+    bonus = [int(n) for n in bonus if isinstance(n, int) and n >= 1]
+
+    mains, bonus = _enforce_ranges(mains, bonus, page_id)
+    draws_list.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+
+
 def scrape_html(draw_cfg):
     """
     More resilient HTML scraping fallback:
     - Try the original selector
     - If nothing found, search for list items or table rows containing a date & numbers
     """
-    url = draw_cfg["html_url"]
+    url = draw_cfg.get("html_url")
+    if not url:
+        return []
     print(f"[debug] Scrape HTML: {url}")
     soup = fetch_soup(url)
 
     # 1) original specific selector attempt
-    selector = f"#draw_history_{draw_cfg['page_id']} ul.list_table_presentation"
+    selector = f"#draw_history_{draw_cfg.get('page_id')} ul.list_table_presentation"
     entries = soup.select(selector)
     draws = []
     if entries:
@@ -197,7 +246,7 @@ def scrape_html(draw_cfg):
                     continue
                 mains = extract_numbers_from_span(main_txt)
                 bonuses = extract_numbers_from_span(bonus_txt)
-                draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonuses})
+                _normalize_and_append(draws, date_obj, mains, bonuses, page_id=draw_cfg.get("page_id"))
         if draws:
             return draws
 
@@ -212,13 +261,11 @@ def scrape_html(draw_cfg):
             continue
         # try to parse date substring
         date_match = None
-        # common patterns like "Sat 24 May 2025" or "24/05/2025"
         m = re.search(r'(\d{1,2}\s+\w{3,9}\s+\d{4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\w+\s+\d{1,2},\s*\d{4})', text)
         if m:
             date_match = m.group(1)
         if not date_match:
-            # try to find a leading 'Date:' label
-            m2 = re.search(r'date[:\s]*([^\|\,\-]{6,20})', text, re.I)
+            m2 = re.search(r'date[:\s]*([^\|\,\-]{6,40})', text, re.I)
             if m2:
                 date_match = m2.group(1)
         if not date_match:
@@ -226,13 +273,12 @@ def scrape_html(draw_cfg):
         date_obj = try_parse_date_any(date_match)
         if not date_obj:
             continue
-        # extract numbers (first up to 8)
-                # extract numbers (all numeric tokens)
+
+        # extract numeric tokens (allow up to 3 digits in tokenization)
         nums = [int(x) for x in re.findall(r'\d{1,3}', text)]
         # remove any stray year tokens (simple heuristic)
         nums = [n for n in nums if n != date_obj.year]
 
-        # If we have a game spec for this page, use it to slice mains/bonus
         pid = draw_cfg.get("page_id")
         spec = GAME_SPECS.get(pid) if pid else None
 
@@ -242,32 +288,21 @@ def scrape_html(draw_cfg):
             mains = nums[:main_count]
             bonus = nums[main_count: main_count + bonus_count]
         else:
-            # original heuristic fallback (keeps current behaviour for unknown games)
             mains = nums[:5]
             bonus = nums[5:8]
 
-        _normalize_and_append(date_obj, mains, bonus)
-
-
+        _normalize_and_append(draws, date_obj, mains, bonus, page_id=pid)
 
     print(f"[debug] scrape_html parsed draws: {len(draws)}")
     return draws
 
-GAME_RANGES = {
-    "australia_powerball": {"main_max": 35, "bonus_max": 20},
-    "powerball": {"main_max": 69, "bonus_max": 26},
-    "megamillions": {"main_max": 70, "bonus_max": 25},
-    "spain_loterias": {"main_max": 49, "bonus_max": 9},
-}
 
-
-# --- updated parser signature and logic ---
 def parse_csv_text(csv_text, page_id=None):
     """
     Robust CSV parser:
     - Force-detect delimiter by inspecting the first non-empty line with common delimiters.
     - Prefer exact 'Winning Number N' + 'Powerball' columns when present.
-    - Use strict numeric extraction for balls (\\b\\d{1,2}\\b).
+    - Use strict numeric extraction for balls (\b\d{1,2}\b).
     - Enforce GAME_RANGES for the provided page_id on every path.
     Returns list of {"date": ISOdate, "main": [...], "bonus": [...]}
     """
@@ -284,12 +319,10 @@ def parse_csv_text(csv_text, page_id=None):
     chosen_delim = None
     for delim in candidate_delims:
         parts = [p.strip().lower() for p in first_line.split(delim)]
-        # look for expected header tokens
-        if any("winning number" in p or "powerball" in p or "draw date" in p or "draw number" in p or "draw" == p for p in parts):
+        if any(("winning number" in p or "powerball" in p or "draw date" in p or "draw number" in p or p == "draw") for p in parts):
             chosen_delim = delim
             break
     if not chosen_delim:
-        # fallback to csv.Sniffer but only if it seems reliable
         try:
             sniffer = csv.Sniffer()
             dialect = sniffer.sniff(sample)
@@ -299,46 +332,16 @@ def parse_csv_text(csv_text, page_id=None):
 
     delimiter = chosen_delim
 
-    # helper: enforce ranges
-    def _enforce_ranges(mains, bonus):
-        ranges = GAME_RANGES.get(page_id) or {}
-        if not ranges:
-            return mains, bonus
-        main_max = ranges.get("main_max", 9999)
-        bonus_max = ranges.get("bonus_max", 9999)
-        mains = [n for n in mains if 1 <= n <= main_max]
-        bonus = [n for n in bonus if 1 <= n <= bonus_max]
-        return mains, bonus
-
     # strict ball-extraction regex (word-boundary 1-2 digits)
     ball_re = re.compile(r'\b(\d{1,2})\b')
 
-        # normalize mains/bonus, enforce ranges, and append to draws
-    def _normalize_and_append(date_obj, mains, bonus):
-        # coerce single int -> list
-        if isinstance(mains, int):
-            mains = [mains]
-        if isinstance(bonus, int):
-            bonus = [bonus]
-
-        # keep only valid ints >= 1
-        mains = [int(n) for n in mains if isinstance(n, int) and n >= 1]
-        bonus = [int(n) for n in bonus if isinstance(n, int) and n >= 1]
-
-        # enforce game ranges (also removes zeros / out-of-range)
-        mains, bonus = _enforce_ranges(mains, bonus)
-
-        draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
-
-
+    draws = []
 
     # Try DictReader first (clean headered CSVs)
     f = io.StringIO(csv_text)
     reader = csv.DictReader(f, delimiter=delimiter)
     fieldnames = reader.fieldnames or []
     fn_lower = " ".join([(fn or "").lower() for fn in fieldnames])
-
-    draws = []
 
     # --- special-case explicit Winning Number columns (Australia-style CSVs) ---
     if fieldnames and ("winning number" in fn_lower or "powerball" in fn_lower):
@@ -382,7 +385,7 @@ def parse_csv_text(csv_text, page_id=None):
                     except Exception:
                         pass
 
-            # powerball column
+            # powerball (or equivalent) column
             pb_col = None
             for k in row.keys():
                 if k and 'powerball' in k.lower():
@@ -397,8 +400,9 @@ def parse_csv_text(csv_text, page_id=None):
                     except Exception:
                         pass
 
-            mains, bonus = _enforce_ranges(mains, bonus)
-            _normalize_and_append(date_obj, mains, bonus)
+            # enforce ranges and append
+            mains, bonus = _enforce_ranges(mains, bonus, page_id)
+            _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
 
         if draws:
             return draws
@@ -409,7 +413,7 @@ def parse_csv_text(csv_text, page_id=None):
     all_rows = [r for r in reader_rows if any((c or "").strip() for c in r)]
     if all_rows:
         header = all_rows[0]
-        header_lower = " ".join([ (h or "").lower() for h in header ])
+        header_lower = " ".join([(h or "").lower() for h in header])
         if "fecha" in header_lower or "combin" in header_lower or (sum(1 for h in header if not h or h.strip() == "") > 2):
             data_rows = all_rows[1:]
             for row in data_rows:
@@ -434,8 +438,8 @@ def parse_csv_text(csv_text, page_id=None):
                         nums.append(int(mm))
                 mains = nums[:6] if len(nums) >= 6 else nums
                 bonus = nums[6:8] if len(nums) > 6 else []
-                mains, bonus = _enforce_ranges(mains, bonus)
-                _normalize_and_append(date_obj, mains, bonus)
+                mains, bonus = _enforce_ranges(mains, bonus, page_id)
+                _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
 
             if draws:
                 return draws
@@ -506,9 +510,8 @@ def parse_csv_text(csv_text, page_id=None):
                 else:
                     mains = numbers[:5]; bonus = numbers[5:]
 
-            mains, bonus = _enforce_ranges(mains, bonus)
-            _normalize_and_append(date_obj, mains, bonus)
-
+            mains, bonus = _enforce_ranges(mains, bonus, page_id)
+            _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
             continue
 
         # last-resort: find a date snippet and extract last numeric tokens (strict 1-2 digit tokens)
@@ -540,9 +543,8 @@ def parse_csv_text(csv_text, page_id=None):
             if len(numbers) >= 6:
                 mains = numbers[:5]
                 bonus = numbers[5:]
-                mains, bonus = _enforce_ranges(mains, bonus)
-                _normalize_and_append(date_obj, mains, bonus)
-
+                mains, bonus = _enforce_ranges(mains, bonus, page_id)
+                _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
 
     # final small dd.mm.YYYY style fallback (keeps your original behavior)
     if not draws and lines and re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', lines[0]):
@@ -559,9 +561,8 @@ def parse_csv_text(csv_text, page_id=None):
                 continue
             nums = [int(x) for x in parts if re.match(r'^\d+$', x)]
             mains, bonus = nums[:6], nums[6:7]
-            mains, bonus = _enforce_ranges(mains, bonus)
-            _normalize_and_append(date_obj, mains, bonus)
-
+            mains, bonus = _enforce_ranges(mains, bonus, page_id)
+            _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
 
     return draws
 
@@ -616,7 +617,6 @@ def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
                         date_obj = try_parse_date_any(candidate)
                 # fallback: try to find any date within the whole line
             if not date_obj:
-                # try to find any dd/mm/yyyy or dd MMM yyyy in the line text
                 txt = line.get_text(" ", strip=True)
                 m = re.search(r'(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', txt)
                 if m:
@@ -639,14 +639,12 @@ def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
             else:
                 # fallback: collect all numeric tokens in the line and take last 5
                 found = [int(x) for x in re.findall(r'\d{1,3}', line.get_text(" ", strip=True))]
-                # remove year token(s)
                 found = [n for n in found if n != date_obj.year]
                 nums = found[-5:] if len(found) >= 5 else found
 
             if len(nums) < 5:
                 continue
 
-            # ensure numbers are integers and trimmed to 5
             mains = nums[:5]
             page_draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": []})
 
@@ -668,7 +666,6 @@ def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
     page = 1
     last_page = None
     while True:
-        # build page URL (LotteryGuru uses ?page=N)
         url = base_url if "?page=" in base_url else base_url.rstrip("/") + (f"?page={page}" if page > 1 else "")
         try:
             print(f"[debug] fetch page {page}: {url}")
@@ -682,11 +679,8 @@ def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
             print(f"[warning] fetch/parse failed for page {page}: {e}")
             break
 
-        # append page_draws (they are newest-first on each page)
         draws.extend(page_draws)
 
-        # if any draw on this page is older than cutoff, we can stop (we still include draws on the page that are newer)
-        # find the oldest date parsed on this page
         oldest_on_page = None
         try:
             dates_on_page = [datetime.fromisoformat(d["date"]).date() for d in page_draws]
@@ -699,15 +693,12 @@ def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
             print(f"[debug] reached cutoff on page {page} (oldest_on_page={oldest_on_page} < cutoff={cutoff})")
             break
 
-        # advance page or stop if no more pages
         page += 1
         if last_page and page > last_page:
             break
-        # safety: cap number of pages to avoid infinite loop
         if page > 50:
             print("[warning] reached page cap (50), stopping")
             break
-        # short sleep to be polite
         time.sleep(0.25)
 
     # dedupe by date+numbers (sometimes duplicates across pages) and sort newest-first
@@ -715,7 +706,6 @@ def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
     deduped = []
     for d in draws:
         key = (d["date"], tuple(d.get("main", [])), tuple(d.get("bonus", [])))
-
         if key in seen:
             continue
         seen.add(key)
@@ -724,8 +714,6 @@ def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
     deduped.sort(key=lambda x: x["date"], reverse=True)
     print(f"[debug] scrape_lotteryguru_fortune_thursday: total parsed draws after paging={len(deduped)}")
     return deduped
-
-
 
 
 def parse_sa_lotto_csv(csv_text):
@@ -748,7 +736,6 @@ def parse_sa_lotto_csv(csv_text):
         date_obj = None
         if len(parts) > 1:
             p = parts[1].strip()
-            # common dot format: 11.03.2000
             m_dot = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$', p)
             if m_dot:
                 try:
@@ -756,7 +743,6 @@ def parse_sa_lotto_csv(csv_text):
                 except Exception:
                     date_obj = None
             else:
-                # try general parser
                 date_obj = try_parse_date_any(p)
 
         # fallback: try to find a dd.mm.YYYY anywhere on the line
@@ -769,7 +755,6 @@ def parse_sa_lotto_csv(csv_text):
                     date_obj = try_parse_date_any(m_any.group(1))
 
         if not date_obj:
-            # nothing we can do for this line
             continue
 
         # Collect numeric tokens after the date column (ignore draw number at parts[0])
@@ -777,7 +762,6 @@ def parse_sa_lotto_csv(csv_text):
         for token in parts[2:]:
             if not token:
                 continue
-            # find first numeric group (allow up to 3 digits)
             m = re.search(r'(\d{1,3})', token)
             if m:
                 try:
@@ -785,7 +769,6 @@ def parse_sa_lotto_csv(csv_text):
                 except Exception:
                     pass
 
-        # require at least 6 mains
         if len(nums) < 6:
             continue
 
@@ -794,19 +777,12 @@ def parse_sa_lotto_csv(csv_text):
 
         draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
 
-
-    # Debug: show a small sample in logs so you can verify parsing
     if draws:
         print(f"[debug] parse_sa_lotto_csv: parsed {len(draws)} rows, sample: {draws[:3]}")
     else:
         print("[debug] parse_sa_lotto_csv: parsed 0 rows (no valid lines)")
 
     return draws
-
-
-
-
-
 
 
 def fetch_csv(draw_cfg):
@@ -818,10 +794,8 @@ def fetch_csv(draw_cfg):
     variants = []
     if csv_url:
         variants.append(csv_url)
-        # try common param variant
         if "?" not in csv_url:
             variants.append(csv_url + "?draws=200")
-    # derived variants from html_url
     html = draw_cfg.get("html_url", "")
     if html:
         if html.endswith("/draw-history"):
@@ -840,7 +814,6 @@ def fetch_csv(draw_cfg):
             print(f"[debug] Attempting CSV URL: {u}")
             r = requests.get(u, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
-            # try different encodings: response.encoding or apparent_encoding or utf-8
             enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
             try:
                 txt = r.content.decode(enc, errors="replace")
@@ -852,12 +825,10 @@ def fetch_csv(draw_cfg):
             else:
                 draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
 
-
             if draws:
                 print(f"[debug] CSV parsed OK from {u} (rows: {len(draws)})")
                 return draws
             else:
-                # print a short sample for debugging
                 sample = txt.splitlines()[:8]
                 print(f"[debug] CSV from {u} parsed 0 draws; sample:\n" + "\n".join(sample))
         except Exception as e:
@@ -869,14 +840,17 @@ def filter_recent(draws, days_back):
     cutoff = datetime.utcnow().date() - timedelta(days=days_back)
     return [d for d in draws if datetime.fromisoformat(d["date"]).date() >= cutoff]
 
-def compute_hot(draws, top_n=10, page_id=None):
+
+def compute_hot(draws, top_main_n=10, top_bonus_n=10, page_id=None):
+    """
+    Count mains & bonuses and return two lists sized by top_main_n / top_bonus_n.
+    """
     mc = Counter()
     bc = Counter()
     ranges = GAME_RANGES.get(page_id) or {}
     main_max = ranges.get("main_max")
     bonus_max = ranges.get("bonus_max")
     for d in draws:
-        # normalize mains
         mains = d.get("main", []) or []
         if isinstance(mains, int):
             mains = [mains]
@@ -884,7 +858,6 @@ def compute_hot(draws, top_n=10, page_id=None):
         if main_max is not None:
             mains = [n for n in mains if n <= main_max]
 
-        # normalize bonus
         bonus = d.get("bonus", []) or []
         if isinstance(bonus, int):
             bonus = [bonus]
@@ -894,7 +867,8 @@ def compute_hot(draws, top_n=10, page_id=None):
 
         mc.update(mains)
         bc.update(bonus)
-    return mc.most_common(top_n), bc.most_common(top_n)
+
+    return mc.most_common(top_main_n), bc.most_common(top_bonus_n)
 
 
 def init_firestore():
@@ -928,10 +902,12 @@ def init_firestore():
         firebase_admin.initialize_app()
     return firestore.client()
 
+
 def save_to_firestore(db, key, out):
     col = db.collection("lotteries")
     doc = col.document(key)
     doc.set(out)
+
 
 # ------------ Main run ------------
 def run_and_save():
@@ -961,7 +937,6 @@ def run_and_save():
             # fallback to HTML scraping if CSV empty or not available
             if not draws:
                 print("[debug] No draws found by CSV, trying HTML scraping.")
-                # special-case LotteryGuru Ghana Fortune Thursday
                 if cfg.get("page_id") == "ghana_fortune_thursday":
                     draws = scrape_lotteryguru_fortune_thursday(cfg)
                     print(f"[debug] parsed draws from LotteryGuru: {len(draws)}")
@@ -971,7 +946,15 @@ def run_and_save():
 
             recent = filter_recent(draws, DAYS_BACK)
             print(f"[debug] recent draws (last {DAYS_BACK} days): {len(recent)}")
-            top_main, top_bonus = compute_hot(recent, top_n=10, page_id=key)
+
+            cfg_hot = HOT_TOP_N.get(key, {})
+            top_main_n = cfg_hot.get("top_main", 10)
+            top_bonus_n = cfg_hot.get("top_bonus", 10)
+
+            top_main, top_bonus = compute_hot(recent,
+                                              top_main_n=top_main_n,
+                                              top_bonus_n=top_bonus_n,
+                                              page_id=key)
 
             out = {
                 "fetched_at": datetime.utcnow().isoformat() + "Z",
