@@ -252,25 +252,28 @@ def scrape_html(draw_cfg):
     print(f"[debug] scrape_html parsed draws: {len(draws)}")
     return draws
 
-def parse_csv_text(csv_text):
+GAME_RANGES = {
+    "australia_powerball": {"main_max": 35, "bonus_max": 20},
+    # add others if you want to enforce ranges (US Powerball, Mega Millions etc.)
+    "powerball": {"main_max": 69, "bonus_max": 26},
+    "megamillions": {"main_max": 70, "bonus_max": 25},
+}
+
+# --- updated parser signature and logic ---
+def parse_csv_text(csv_text, page_id=None):
     """
-    Robust CSV parser that handles:
-    - BOM stripping, delimiter sniffing
-    - clean headered CSVs (DictReader) with English/Spanish headers
-    - messy Spanish Google Sheets (row-oriented: first col=date, rest numbers)
-    - whitespace/tokenized headerless files (e.g. "Mega Millions 12 5 2003 12 44 15 ...")
-    Returns: list of {"date": ISOdate, "main": [...], "bonus": [...]}
+    Robust CSV parser (updated):
+    - Accepts optional page_id so game-specific parsing/range enforcement can be applied.
+    - Special-case exact-column extraction when headers include 'Winning Number' / 'Powerball'.
     """
     if not csv_text:
         return []
 
     csv_text = csv_text.lstrip('\ufeff\ufeff')
-
-    # quick lines for sniffing
     lines = [ln for ln in csv_text.splitlines() if ln.strip()]
     sample = "\n".join(lines[:20]) if lines else csv_text[:4096]
 
-    # detect delimiter (fall back to tab/comma)
+    # detect delimiter
     delimiter = ","
     try:
         sniffer = csv.Sniffer()
@@ -279,63 +282,85 @@ def parse_csv_text(csv_text):
     except Exception:
         delimiter = "\t" if "\t" in sample else ","
 
-    # Try DictReader first
+    # Try DictReader to get headers (if present)
     f = io.StringIO(csv_text)
     reader = csv.DictReader(f, delimiter=delimiter)
     fieldnames = reader.fieldnames or []
 
-    # helpers to decide parsing strategy
-    has_date_header = any(any(k in (fn or "").lower() for k in ("date", "fecha", "draw")) for fn in fieldnames)
-    looks_like_spanish_sheet = any("combin" in (fn or "").lower() for fn in fieldnames) or (sum(1 for fn in fieldnames if not fn or fn.strip() == "") > 2)
+    # Quick header-lower set
+    fn_lower = " ".join([(fn or "").lower() for fn in fieldnames])
 
-    # Clean headered CSV path (supports English + Spanish headers)
-    if has_date_header and not looks_like_spanish_sheet:
+    # SPECIAL-CASE: explicit "Winning Number N" + "Powerball Number" style CSVs (Australia)
+    if fieldnames and ("winning number" in fn_lower or "powerball" in fn_lower):
         draws = []
         f2 = io.StringIO(csv_text)
         reader2 = csv.DictReader(f2, delimiter=delimiter)
         for row in reader2:
-            # locate date column
+            # find date column
             date_str = None
             for k in row:
-                kl = (k or "").lower()
-                if 'date' in kl or 'fecha' in kl or 'draw' in kl:
+                if k and any(tok in k.lower() for tok in ("date", "draw date", "fecha", "draw")):
                     date_str = (row[k] or "").strip()
                     break
-            if not date_str:
-                for alt in ('draw', 'draw_date', 'date_played', 'fecha'):
-                    if alt in row:
-                        date_str = (row[alt] or "").strip()
-                        break
             if not date_str:
                 continue
             date_obj = try_parse_date_any(date_str)
             if not date_obj:
                 continue
 
+            # collect winning numbers by matching column names 'winning number X'
             mains = []
             bonus = []
-            # header-name heuristics: english + spanish tokens
-            for k, v in row.items():
-                if not v:
+            # find all winning number columns and sort them by trailing index
+            win_cols = []
+            for k in row.keys():
+                if not k:
                     continue
-                key = (k or "").lower()
-                val = (v or "").strip()
-                if re.search(r'ball|num|pick|winning|white|combinaci|ganadora|bola|nro|número|numero', key, re.I):
-                    found = re.findall(r'\d{1,2}', val)
-                    mains.extend([int(x) for x in found])
-                elif re.search(r'bonus|comp|complementar|reint|reintegro|power|mega|joker', key, re.I):
-                    found = re.findall(r'\d{1,2}', val)
-                    bonus.extend([int(x) for x in found])
-            # fallback: scan row values left-to-right
-            if not mains:
-                for v in row.values():
-                    if v and re.search(r'\d', v):
-                        found = re.findall(r'\d{1,2}', v)
-                        if len(found) >= 3:
-                            mains = [int(x) for x in found[:7]]
-                            break
+                kl = k.lower()
+                m = re.match(r'winning\s*number\s*(\d+)', kl)
+                if m:
+                    try:
+                        idx = int(m.group(1))
+                    except Exception:
+                        idx = 0
+                    win_cols.append((idx, k))
+            win_cols.sort(key=lambda x: x[0])
+            for idx, col in win_cols:
+                v = (row.get(col) or "").strip()
+                mnum = re.search(r'\d{1,3}', v)
+                if mnum:
+                    try:
+                        mains.append(int(mnum.group(0)))
+                    except Exception:
+                        pass
+
+            # find powerball column (if present)
+            pb_col = None
+            for k in row.keys():
+                if k and 'powerball' in k.lower():
+                    pb_col = k
+                    break
+            if pb_col:
+                v = (row.get(pb_col) or "").strip()
+                mnum = re.search(r'\d{1,3}', v)
+                if mnum:
+                    try:
+                        bonus.append(int(mnum.group(0)))
+                    except Exception:
+                        pass
+
+            # Enforce sensible ranges when available for the game
+            ranges = GAME_RANGES.get(page_id) or {}
+            if ranges:
+                main_max = ranges.get("main_max", 9999)
+                bonus_max = ranges.get("bonus_max", 9999)
+                mains = [n for n in mains if 1 <= n <= main_max]
+                bonus = [n for n in bonus if 1 <= n <= bonus_max]
+
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
-        return draws
+        if draws:
+            return draws
+
 
     # If it's a messy Spanish sheet (many empty headers or 'COMBINACIÓN...'), parse row-oriented:
     # 1st column = date, rest columns = numbers; final long Joker id ignored.
@@ -788,7 +813,7 @@ def fetch_csv(draw_cfg):
                 draws = parse_sa_lotto_csv(txt)
                 print(f"[debug] fetch_csv: sa_lotto parsed {len(draws)} rows from {u}")
             else:
-                draws = parse_csv_text(txt)
+                draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
 
 
             if draws:
