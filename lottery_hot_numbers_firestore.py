@@ -246,7 +246,8 @@ def scrape_html(draw_cfg):
             mains = nums[:5]
             bonus = nums[5:8]
 
-        draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+        _normalize_and_append(date_obj, mains, bonus)
+
 
 
     print(f"[debug] scrape_html parsed draws: {len(draws)}")
@@ -254,10 +255,11 @@ def scrape_html(draw_cfg):
 
 GAME_RANGES = {
     "australia_powerball": {"main_max": 35, "bonus_max": 20},
-    # add others if you want to enforce ranges (US Powerball, Mega Millions etc.)
     "powerball": {"main_max": 69, "bonus_max": 26},
     "megamillions": {"main_max": 70, "bonus_max": 25},
+    "spain_loterias": {"main_max": 49, "bonus_max": 9},
 }
+
 
 # --- updated parser signature and logic ---
 def parse_csv_text(csv_text, page_id=None):
@@ -310,6 +312,25 @@ def parse_csv_text(csv_text, page_id=None):
 
     # strict ball-extraction regex (word-boundary 1-2 digits)
     ball_re = re.compile(r'\b(\d{1,2})\b')
+
+        # normalize mains/bonus, enforce ranges, and append to draws
+    def _normalize_and_append(date_obj, mains, bonus):
+        # coerce single int -> list
+        if isinstance(mains, int):
+            mains = [mains]
+        if isinstance(bonus, int):
+            bonus = [bonus]
+
+        # keep only valid ints >= 1
+        mains = [int(n) for n in mains if isinstance(n, int) and n >= 1]
+        bonus = [int(n) for n in bonus if isinstance(n, int) and n >= 1]
+
+        # enforce game ranges (also removes zeros / out-of-range)
+        mains, bonus = _enforce_ranges(mains, bonus)
+
+        draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+
+
 
     # Try DictReader first (clean headered CSVs)
     f = io.StringIO(csv_text)
@@ -377,7 +398,8 @@ def parse_csv_text(csv_text, page_id=None):
                         pass
 
             mains, bonus = _enforce_ranges(mains, bonus)
-            draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+            _normalize_and_append(date_obj, mains, bonus)
+
         if draws:
             return draws
 
@@ -413,7 +435,8 @@ def parse_csv_text(csv_text, page_id=None):
                 mains = nums[:6] if len(nums) >= 6 else nums
                 bonus = nums[6:8] if len(nums) > 6 else []
                 mains, bonus = _enforce_ranges(mains, bonus)
-                draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+                _normalize_and_append(date_obj, mains, bonus)
+
             if draws:
                 return draws
 
@@ -484,7 +507,8 @@ def parse_csv_text(csv_text, page_id=None):
                     mains = numbers[:5]; bonus = numbers[5:]
 
             mains, bonus = _enforce_ranges(mains, bonus)
-            draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+            _normalize_and_append(date_obj, mains, bonus)
+
             continue
 
         # last-resort: find a date snippet and extract last numeric tokens (strict 1-2 digit tokens)
@@ -517,7 +541,8 @@ def parse_csv_text(csv_text, page_id=None):
                 mains = numbers[:5]
                 bonus = numbers[5:]
                 mains, bonus = _enforce_ranges(mains, bonus)
-                draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+                _normalize_and_append(date_obj, mains, bonus)
+
 
     # final small dd.mm.YYYY style fallback (keeps your original behavior)
     if not draws and lines and re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', lines[0]):
@@ -535,7 +560,8 @@ def parse_csv_text(csv_text, page_id=None):
             nums = [int(x) for x in parts if re.match(r'^\d+$', x)]
             mains, bonus = nums[:6], nums[6:7]
             mains, bonus = _enforce_ranges(mains, bonus)
-            draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+            _normalize_and_append(date_obj, mains, bonus)
+
 
     return draws
 
@@ -688,7 +714,8 @@ def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
     seen = set()
     deduped = []
     for d in draws:
-        key = (d["date"], tuple(d["main"]))
+        key = (d["date"], tuple(d.get("main", [])), tuple(d.get("bonus", [])))
+
         if key in seen:
             continue
         seen.add(key)
@@ -767,6 +794,7 @@ def parse_sa_lotto_csv(csv_text):
 
         draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
 
+
     # Debug: show a small sample in logs so you can verify parsing
     if draws:
         print(f"[debug] parse_sa_lotto_csv: parsed {len(draws)} rows, sample: {draws[:3]}")
@@ -841,13 +869,33 @@ def filter_recent(draws, days_back):
     cutoff = datetime.utcnow().date() - timedelta(days=days_back)
     return [d for d in draws if datetime.fromisoformat(d["date"]).date() >= cutoff]
 
-def compute_hot(draws, top_n=10):
+def compute_hot(draws, top_n=10, page_id=None):
     mc = Counter()
     bc = Counter()
+    ranges = GAME_RANGES.get(page_id) or {}
+    main_max = ranges.get("main_max")
+    bonus_max = ranges.get("bonus_max")
     for d in draws:
-        mc.update(d.get("main", []))
-        bc.update(d.get("bonus", []))
+        # normalize mains
+        mains = d.get("main", []) or []
+        if isinstance(mains, int):
+            mains = [mains]
+        mains = [int(n) for n in mains if isinstance(n, int) and n >= 1]
+        if main_max is not None:
+            mains = [n for n in mains if n <= main_max]
+
+        # normalize bonus
+        bonus = d.get("bonus", []) or []
+        if isinstance(bonus, int):
+            bonus = [bonus]
+        bonus = [int(n) for n in bonus if isinstance(n, int) and n >= 1]
+        if bonus_max is not None:
+            bonus = [n for n in bonus if n <= bonus_max]
+
+        mc.update(mains)
+        bc.update(bonus)
     return mc.most_common(top_n), bc.most_common(top_n)
+
 
 def init_firestore():
     """
@@ -923,7 +971,7 @@ def run_and_save():
 
             recent = filter_recent(draws, DAYS_BACK)
             print(f"[debug] recent draws (last {DAYS_BACK} days): {len(recent)}")
-            top_main, top_bonus = compute_hot(recent, top_n=10)
+            top_main, top_bonus = compute_hot(recent, top_n=10, page_id=key)
 
             out = {
                 "fetched_at": datetime.utcnow().isoformat() + "Z",
