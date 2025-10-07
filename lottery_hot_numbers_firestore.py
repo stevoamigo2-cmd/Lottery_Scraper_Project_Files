@@ -262,44 +262,72 @@ GAME_RANGES = {
 # --- updated parser signature and logic ---
 def parse_csv_text(csv_text, page_id=None):
     """
-    Robust CSV parser (updated):
-    - Accepts optional page_id so game-specific parsing/range enforcement can be applied.
-    - Special-case exact-column extraction when headers include 'Winning Number' / 'Powerball'.
+    Robust CSV parser:
+    - Force-detect delimiter by inspecting the first non-empty line with common delimiters.
+    - Prefer exact 'Winning Number N' + 'Powerball' columns when present.
+    - Use strict numeric extraction for balls (\\b\\d{1,2}\\b).
+    - Enforce GAME_RANGES for the provided page_id on every path.
+    Returns list of {"date": ISOdate, "main": [...], "bonus": [...]}
     """
     if not csv_text:
         return []
 
     csv_text = csv_text.lstrip('\ufeff\ufeff')
     lines = [ln for ln in csv_text.splitlines() if ln.strip()]
-    sample = "\n".join(lines[:20]) if lines else csv_text[:4096]
+    sample = "\n".join(lines[:40]) if lines else csv_text[:4096]
 
-    # detect delimiter
-    delimiter = ","
-    try:
-        sniffer = csv.Sniffer()
-        dialect = sniffer.sniff(sample)
-        delimiter = dialect.delimiter
-    except Exception:
-        delimiter = "\t" if "\t" in sample else ","
+    # --- robust delimiter detection: check header line with common delimiters ---
+    first_line = lines[0] if lines else ""
+    candidate_delims = [",", "\t", ";"]
+    chosen_delim = None
+    for delim in candidate_delims:
+        parts = [p.strip().lower() for p in first_line.split(delim)]
+        # look for expected header tokens
+        if any("winning number" in p or "powerball" in p or "draw date" in p or "draw number" in p or "draw" == p for p in parts):
+            chosen_delim = delim
+            break
+    if not chosen_delim:
+        # fallback to csv.Sniffer but only if it seems reliable
+        try:
+            sniffer = csv.Sniffer()
+            dialect = sniffer.sniff(sample)
+            chosen_delim = dialect.delimiter
+        except Exception:
+            chosen_delim = "\t" if "\t" in sample else ","
 
-    # Try DictReader to get headers (if present)
+    delimiter = chosen_delim
+
+    # helper: enforce ranges
+    def _enforce_ranges(mains, bonus):
+        ranges = GAME_RANGES.get(page_id) or {}
+        if not ranges:
+            return mains, bonus
+        main_max = ranges.get("main_max", 9999)
+        bonus_max = ranges.get("bonus_max", 9999)
+        mains = [n for n in mains if 1 <= n <= main_max]
+        bonus = [n for n in bonus if 1 <= n <= bonus_max]
+        return mains, bonus
+
+    # strict ball-extraction regex (word-boundary 1-2 digits)
+    ball_re = re.compile(r'\b(\d{1,2})\b')
+
+    # Try DictReader first (clean headered CSVs)
     f = io.StringIO(csv_text)
     reader = csv.DictReader(f, delimiter=delimiter)
     fieldnames = reader.fieldnames or []
-
-    # Quick header-lower set
     fn_lower = " ".join([(fn or "").lower() for fn in fieldnames])
 
-    # SPECIAL-CASE: explicit "Winning Number N" + "Powerball Number" style CSVs (Australia)
+    draws = []
+
+    # --- special-case explicit Winning Number columns (Australia-style CSVs) ---
     if fieldnames and ("winning number" in fn_lower or "powerball" in fn_lower):
-        draws = []
         f2 = io.StringIO(csv_text)
         reader2 = csv.DictReader(f2, delimiter=delimiter)
         for row in reader2:
             # find date column
             date_str = None
             for k in row:
-                if k and any(tok in k.lower() for tok in ("date", "draw date", "fecha", "draw")):
+                if k and any(tok in (k or "").lower() for tok in ("date", "draw date", "fecha", "draw")):
                     date_str = (row[k] or "").strip()
                     break
             if not date_str:
@@ -308,10 +336,9 @@ def parse_csv_text(csv_text, page_id=None):
             if not date_obj:
                 continue
 
-            # collect winning numbers by matching column names 'winning number X'
+            # collect Winning Number N columns in index order
             mains = []
             bonus = []
-            # find all winning number columns and sort them by trailing index
             win_cols = []
             for k in row.keys():
                 if not k:
@@ -327,14 +354,14 @@ def parse_csv_text(csv_text, page_id=None):
             win_cols.sort(key=lambda x: x[0])
             for idx, col in win_cols:
                 v = (row.get(col) or "").strip()
-                mnum = re.search(r'\d{1,3}', v)
+                mnum = ball_re.search(v)
                 if mnum:
                     try:
-                        mains.append(int(mnum.group(0)))
+                        mains.append(int(mnum.group(1)))
                     except Exception:
                         pass
 
-            # find powerball column (if present)
+            # powerball column
             pb_col = None
             for k in row.keys():
                 if k and 'powerball' in k.lower():
@@ -342,38 +369,27 @@ def parse_csv_text(csv_text, page_id=None):
                     break
             if pb_col:
                 v = (row.get(pb_col) or "").strip()
-                mnum = re.search(r'\d{1,3}', v)
+                mnum = ball_re.search(v)
                 if mnum:
                     try:
-                        bonus.append(int(mnum.group(0)))
+                        bonus.append(int(mnum.group(1)))
                     except Exception:
                         pass
 
-            # Enforce sensible ranges when available for the game
-            ranges = GAME_RANGES.get(page_id) or {}
-            if ranges:
-                main_max = ranges.get("main_max", 9999)
-                bonus_max = ranges.get("bonus_max", 9999)
-                mains = [n for n in mains if 1 <= n <= main_max]
-                bonus = [n for n in bonus if 1 <= n <= bonus_max]
-
+            mains, bonus = _enforce_ranges(mains, bonus)
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
         if draws:
             return draws
 
-
-    # If it's a messy Spanish sheet (many empty headers or 'COMBINACIÓN...'), parse row-oriented:
-    # 1st column = date, rest columns = numbers; final long Joker id ignored.
+    # --- Spanish-sheet or row-oriented (first col = date, rest numbers) ---
     f_rows = io.StringIO(csv_text)
     reader_rows = csv.reader(f_rows, delimiter=delimiter)
     all_rows = [r for r in reader_rows if any((c or "").strip() for c in r)]
     if all_rows:
         header = all_rows[0]
-        # detect "spanish-like" header if FECHA present or combin... in header OR many empty headers
-        header_lower = " ".join([h.lower() for h in header if h])
+        header_lower = " ".join([ (h or "").lower() for h in header ])
         if "fecha" in header_lower or "combin" in header_lower or (sum(1 for h in header if not h or h.strip() == "") > 2):
             data_rows = all_rows[1:]
-            draws = []
             for row in data_rows:
                 if not row:
                     continue
@@ -387,27 +403,26 @@ def parse_csv_text(csv_text, page_id=None):
                     if not date_obj:
                         continue
                 tail = [c.strip() for c in row[1:] if c is not None and str(c).strip() != ""]
-                # drop trailing joker-like long numeric token if present
+                # drop trailing long Joker-like numeric token
                 if tail and re.fullmatch(r'\d{6,}', tail[-1]):
                     tail = tail[:-1]
                 nums = []
                 for v in tail:
-                    found = re.findall(r'\d{1,2}', v)
-                    nums.extend([int(x) for x in found])
+                    for mm in ball_re.findall(v):
+                        nums.append(int(mm))
                 mains = nums[:6] if len(nums) >= 6 else nums
                 bonus = nums[6:8] if len(nums) > 6 else []
+                mains, bonus = _enforce_ranges(mains, bonus)
                 draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
             if draws:
                 return draws
 
-    # Headerless / tokenized fallback (handles whitespace-separated lines like "Mega Millions 12 5 2003 ...")
+    # --- headerless / tokenized fallback (space-separated etc.) ---
     f3 = io.StringIO(csv_text)
     reader3 = csv.reader(f3, delimiter=delimiter)
-    draws = []
     for raw_row in reader3:
         if not raw_row:
             continue
-        # normalize tokens: if csv.reader returned one cell (common for space-delimited), split on whitespace
         if len(raw_row) == 1:
             tokens = re.split(r'\s+', raw_row[0].strip())
         else:
@@ -415,7 +430,7 @@ def parse_csv_text(csv_text, page_id=None):
         if not tokens:
             continue
 
-        # find first index where three consecutive tokens are numeric and look like month/day/year or day/month/year
+        # find date index (three consecutive numeric tokens that look like a date)
         date_idx = None
         month = day = year = None
         for i in range(len(tokens) - 2):
@@ -424,23 +439,19 @@ def parse_csv_text(csv_text, page_id=None):
                     a, b, c = int(tokens[i]), int(tokens[i+1]), int(tokens[i+2])
                 except Exception:
                     continue
-                # prefer (M D Y) where Y is 4-digit reasonable
                 if 1900 <= c <= 2100 and 1 <= a <= 12 and 1 <= b <= 31:
                     date_idx = i
                     month, day, year = a, b, c
                     break
-                # or (D M Y)
                 if 1900 <= c <= 2100 and 1 <= b <= 12 and 1 <= a <= 31:
                     date_idx = i
                     month, day, year = b, a, c
                     break
 
         if date_idx is not None:
-            # game name is tokens[0:date_idx] — normalize to remove spaces/hyphens for matching
             game_raw = " ".join(tokens[:date_idx]).lower()
             game = re.sub(r'[\s\-_]', '', game_raw)
 
-            # build date object
             try:
                 date_obj = datetime(year, month, day).date()
             except Exception:
@@ -449,11 +460,9 @@ def parse_csv_text(csv_text, page_id=None):
             numeric_tail = tokens[date_idx+3:]
             numbers = []
             for n in numeric_tail:
-                if re.search(r'\d', str(n)):
-                    found = re.findall(r'\d{1,3}', str(n))
-                    numbers.extend([int(x) for x in found])
+                for mm in ball_re.findall(str(n)):
+                    numbers.append(int(mm))
 
-            
             spec = None
             for k in GAME_SPECS:
                 if game.startswith(k):
@@ -465,23 +474,20 @@ def parse_csv_text(csv_text, page_id=None):
                 mains = numbers[:main_count]
                 bonus = numbers[main_count:]
             else:
-                # heuristic fallback
                 if len(numbers) == 6:
-                    mains = numbers[:5]
-                    bonus = numbers[5:]
+                    mains = numbers[:5]; bonus = numbers[5:]
                 elif len(numbers) == 7:
-                    mains = numbers[:5]
-                    bonus = numbers[5:]
+                    mains = numbers[:5]; bonus = numbers[5:]
                 elif len(numbers) == 8:
-                    mains = numbers[:7]
-                    bonus = numbers[7:]
+                    mains = numbers[:7]; bonus = numbers[7:]
                 else:
-                    mains = numbers[:5]
-                    bonus = numbers[5:]
+                    mains = numbers[:5]; bonus = numbers[5:]
+
+            mains, bonus = _enforce_ranges(mains, bonus)
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
             continue
 
-        # Last-resort: try to find a date snippet and extract last numeric tokens
+        # last-resort: find a date snippet and extract last numeric tokens (strict 1-2 digit tokens)
         joined = " ".join(tokens)
         date_obj = None
         m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', joined)
@@ -504,16 +510,17 @@ def parse_csv_text(csv_text, page_id=None):
                 date_obj = None
         if not date_obj:
             continue
-        nums = re.findall(r'\d{1,2}', joined)
+        nums = ball_re.findall(joined)
         if len(nums) >= 6:
             numbers = [int(x) for x in nums[-8:]]
             if len(numbers) >= 6:
                 mains = numbers[:5]
                 bonus = numbers[5:]
+                mains, bonus = _enforce_ranges(mains, bonus)
                 draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
-                    # Last-resort: try headerless tab-separated numeric layout (e.g. SA Lotto)
+
+    # final small dd.mm.YYYY style fallback (keeps your original behavior)
     if not draws and lines and re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', lines[0]):
-        draws = []
         for line in lines:
             parts = re.split(r'[\t,; ]+', line.strip())
             if len(parts) < 8:
@@ -525,11 +532,13 @@ def parse_csv_text(csv_text, page_id=None):
             date_obj = try_parse_date_any(date_str)
             if not date_obj:
                 continue
-            # Extract numbers between date and final column
             nums = [int(x) for x in parts if re.match(r'^\d+$', x)]
-            mains, bonus = nums[:6], nums[6:7]  # 6 main, 1 bonus
+            mains, bonus = nums[:6], nums[6:7]
+            mains, bonus = _enforce_ranges(mains, bonus)
             draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
+
     return draws
+
 
 def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
     """
