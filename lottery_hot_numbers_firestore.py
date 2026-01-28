@@ -911,17 +911,184 @@ def fetch_national_lottery_api(draw_cfg, interval="ONE_EIGHTY"):
 
 
 
-def fetch_csv(draw_cfg):
+
+# reuse your HEADERS, REQUEST_TIMEOUT etc.
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; LotteryHotBot/1.0)"}
+REQUEST_TIMEOUT = 15
+
+def find_api_download_url_from_html(html_text):
     """
-    Try a series of CSV url variants and return parsed draws or [].
-    Will attempt different encodings and query param variants.
+    Try to extract an API download URL from the draw-history HTML.
+    Looks for explicit '/draw-game/results/<id>/download' appearances in scripts/buttons.
     """
+    soup = BeautifulSoup(html_text, "html.parser")
+    # 1) try data attributes on buttons
+    btn = soup.find("button", attrs={"data-download-url": True})
+    if btn:
+        return btn["data-download-url"]
+
+    # 2) search for the API pattern anywhere in the page (common)
+    m = re.search(r'(/draw-game/results/\d+/download\?[^"\']*)', html_text)
+    if m:
+        # make absolute
+        return "https://api-dfe.national-lottery.co.uk" + m.group(1)
+
+    # 3) try to find the numeric game id from elements and construct URL
+    # e.g. data-game-id="1"
+    el = soup.find(attrs={"data-game-id": True})
+    if el:
+        gid = el["data-game-id"]
+        return f"https://api-dfe.national-lottery.co.uk/draw-game/results/{gid}/download?interval=ONE_EIGHTY"
+
+    return None
+
+
+def fetch_api_download(api_url, referer=None):
+    """
+    Make a GET like the browser to the api-dfe endpoint.
+    Returns (content_type, text_or_json)
+    """
+    headers = HEADERS.copy()
+    headers.update({
+        "Accept": "application/json, text/plain, */*",
+        # include a Referer/Origin similar to the site (helps bypass simple CORS/origin checks)
+        "Origin": "https://www.national-lottery.co.uk",
+    })
+    if referer:
+        headers["Referer"] = referer
+
+    # some endpoints require a device id header in practice; if you see it in your browser copy it
+    # headers["x-dfe-device-id"] = "<paste-from-devtools-if-needed>"
+
+    r = requests.get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+
+    ctype = r.headers.get("content-type", "")
+    if "application/json" in ctype or r.text.strip().startswith("{"):
+        return "json", r.json()
+    else:
+        # treat as text/CSV
+        return "text", r.text
+
+
+def extract_draws_from_api_json(jobj, page_id=None):
+    """
+    Try to normalize likely JSON shapes into draws: [{"date":"YYYY-MM-DD","main":[...],"bonus":[...]}, ...]
+    This is intentionally forgiving: many APIs use 'drawDate', 'winningNumbers', 'numbers', etc.
+    If you can paste a sample JSON I can make this exact; for now handle a few common shapes.
+    """
+    draws = []
+
+    # If top-level is dict with 'draws' or 'results' or 'items' list, use that list
+    candidates = []
+    if isinstance(jobj, dict):
+        for key in ("draws", "results", "items", "data"):
+            if key in jobj and isinstance(jobj[key], list):
+                candidates = jobj[key]
+                break
+        # sometimes the API returns an object with fields like date/numbers directly as list-of-objects:
+        if not candidates and any(isinstance(v, list) for v in jobj.values()):
+            # pick the first list of dicts
+            for v in jobj.values():
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    candidates = v
+                    break
+    elif isinstance(jobj, list):
+        candidates = jobj
+
+    # helper to pick numbers from a dict
+    def pick_numbers(obj):
+        # common keys:
+        possible_num_keys = ["winningNumbers", "numbers", "winning_numbers", "winningNumber", "main"]
+        for k in possible_num_keys:
+            if k in obj:
+                val = obj[k]
+                # sometimes it's a dict with a "numbers" list
+                if isinstance(val, dict) and "numbers" in val:
+                    return [int(x) for x in val["numbers"]]
+                if isinstance(val, list):
+                    return [int(x) for x in val]
+                if isinstance(val, str):
+                    return [int(n) for n in re.findall(r'\d{1,3}', val)]
+        # fallback: gather any numeric list-like values in object
+        nums = []
+        for v in obj.values():
+            if isinstance(v, list) and all(isinstance(x, (int, float, str)) for x in v):
+                for x in v:
+                    if isinstance(x, (int, float)):
+                        nums.append(int(x))
+                    else:
+                        for m in re.findall(r'\d{1,3}', str(x)):
+                            nums.append(int(m))
+                if nums:
+                    break
+        return nums
+
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        # date: try common keys
+        date_keys = ["drawDate", "date", "draw_date", "draw_day"]
+        date_str = None
+        for dk in date_keys:
+            if dk in item and item[dk]:
+                date_str = str(item[dk])
+                break
+        if not date_str:
+            # sometimes date is nested:
+            for v in item.values():
+                if isinstance(v, str) and re.search(r'\d{4}-\d{2}-\d{2}', v):
+                    date_str = v; break
+
+        if not date_str:
+            # if no date, skip: we only want entries with date
+            continue
+
+        numbers = pick_numbers(item)
+        if not numbers:
+            continue
+
+        # guess main/bonus split from GAME_SPECS you already have (fallback to 5 main)
+        main_count = 5
+        if page_id and page_id in GAME_SPECS:
+            main_count = GAME_SPECS[page_id].get("main", main_count)
+
+        mains = numbers[:main_count]
+        bonus = numbers[main_count:main_count+3]  # take up to 3 bonuses if present
+
+        # normalise format (ISO date preferred)
+        # try to coerce common ISO-like strings directly
+        from datetime import datetime
+        iso_date = None
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d %B %Y"):
+            try:
+                iso_date = datetime.strptime(date_str.split("T")[0], fmt).date().isoformat()
+                break
+            except Exception:
+                pass
+        if not iso_date:
+            # as a last resort, keep raw
+            iso_date = date_str.split("T")[0]
+
+        draws.append({"date": iso_date, "main": mains, "bonus": bonus})
+
+    return draws
+
+
+def fetch_csv_or_api(draw_cfg):
+    """
+    Replaces/augments your current fetch_csv: try CSV URLs first, else attempt the API
+    draw_cfg: same structure as your LOTTERIES entries, may include 'api_game_id'
+    """
+    # 1) try your existing CSV variants (reuse your code or simple attempt)
     csv_url = draw_cfg.get("csv_url")
+    tried = []
     variants = []
     if csv_url:
         variants.append(csv_url)
         if "?" not in csv_url:
             variants.append(csv_url + "?draws=200")
+
     html = draw_cfg.get("html_url", "")
     if html:
         if html.endswith("/draw-history"):
@@ -929,37 +1096,48 @@ def fetch_csv(draw_cfg):
             variants.append(html + "/draw-history/csv")
         else:
             variants.append(html.rstrip("/") + "/csv")
-            variants.append(html.rstrip("/") + "/csv?draws=200")
 
-    tried = set()
     for u in variants:
         if not u or u in tried:
             continue
-        tried.add(u)
+        tried.append(u)
         try:
-            print(f"[debug] Attempting CSV URL: {u}")
             r = requests.get(u, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            r.raise_for_status()
-            enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
-            try:
-                txt = r.content.decode(enc, errors="replace")
-            except Exception:
-                txt = r.content.decode("ISO-8859-1", errors="replace")
-            if draw_cfg.get("page_id") == "sa_lotto":
-                draws = parse_sa_lotto_csv(txt)
-                print(f"[debug] fetch_csv: sa_lotto parsed {len(draws)} rows from {u}")
-            else:
-                draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
+            if r.status_code == 200 and r.text.strip():
+                # pass to your parse_csv_text()
+                return parse_csv_text(r.text, page_id=draw_cfg.get("page_id"))
+        except Exception:
+            pass
 
-            if draws:
-                print(f"[debug] CSV parsed OK from {u} (rows: {len(draws)})")
-                return draws
-            else:
-                sample = txt.splitlines()[:8]
-                print(f"[debug] CSV from {u} parsed 0 draws; sample:\n" + "\n".join(sample))
-        except Exception as e:
-            print(f"[warning] CSV fetch failed for {u}: {e}")
-    return []
+    # 2) if CSV failed, fetch the HTML page and try to extract the API URL
+    try:
+        page = requests.get(draw_cfg.get("html_url"), headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        page.raise_for_status()
+        api_url = find_api_download_url_from_html(page.text)
+    except Exception:
+        api_url = None
+
+    # 3) if we didn't find an explicit API URL, try constructing from a provided game_id
+    if not api_url and draw_cfg.get("api_game_id"):
+        gid = draw_cfg["api_game_id"]
+        api_url = f"https://api-dfe.national-lottery.co.uk/draw-game/results/{gid}/download?interval=ONE_EIGHTY"
+
+    if not api_url:
+        return []  # nothing else to try
+
+    # 4) fetch the API (some endpoints may require Referer/Origin headers)
+    try:
+        ctype, content = fetch_api_download(api_url, referer=draw_cfg.get("html_url"))
+        if ctype == "text":
+            return parse_csv_text(content, page_id=draw_cfg.get("page_id"))
+        else:
+            # content is JSON
+            draws = extract_draws_from_api_json(content, page_id=draw_cfg.get("page_id"))
+            return draws
+    except Exception as e:
+        print(f"[warning] API fetch failed for {api_url}: {e}")
+        return []
+
 
 
 def filter_recent(draws, days_back):
