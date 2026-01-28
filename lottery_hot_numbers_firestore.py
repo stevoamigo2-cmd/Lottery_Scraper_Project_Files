@@ -817,6 +817,69 @@ csv_text = fetch_csv_with_curl(url)
 print(csv_text[:500])  # Preview first 500 characters
 
 
+def parse_uk_lottery_csv(csv_text, page_id=None):
+    """
+    Parse UK National Lottery CSVs (Euromillions, Lotto, Thunderball, Set-for-Life)
+    into a list of {"date": ISOdate, "main": [...], "bonus": [...]}.
+
+    Expects CSV headers like:
+    DrawDate,Ball 1,Ball 2,Ball 3,Ball 4,Ball 5,Lucky Star 1,Lucky Star 2,...
+
+    Args:
+        csv_text (str): CSV content as text.
+        page_id (str): Game identifier, used for _enforce_ranges.
+
+    Returns:
+        List[dict]: Parsed draws, newest-first.
+    """
+    import io
+    import csv
+    draws = []
+    if not csv_text:
+        return draws
+
+    f = io.StringIO(csv_text)
+    reader = csv.DictReader(f)
+    fieldnames_lower = [h.lower() for h in reader.fieldnames or []]
+
+    # Determine which columns are mains and bonus
+    main_cols = []
+    bonus_cols = []
+    for idx, col in enumerate(reader.fieldnames or []):
+        cl = col.lower()
+        if cl.startswith("ball "):
+            main_cols.append(col)
+        elif "lucky star" in cl or "bonus" in cl:
+            bonus_cols.append(col)
+
+    for row in reader:
+        date_str = row.get("DrawDate") or row.get("Draw Date") or row.get("drawdate") or ""
+        date_obj = try_parse_date_any(date_str)
+        if not date_obj:
+            continue
+
+        # Extract main balls
+        mains = []
+        for col in main_cols:
+            val = row.get(col, "").strip()
+            if val.isdigit():
+                mains.append(int(val))
+
+        # Extract bonus balls
+        bonus = []
+        for col in bonus_cols:
+            val = row.get(col, "").strip()
+            if val.isdigit():
+                bonus.append(int(val))
+
+        # enforce numeric ranges per game
+        mains, bonus = _enforce_ranges(mains, bonus, page_id)
+        _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
+
+    # Sort newest-first
+    draws.sort(key=lambda x: x["date"], reverse=True)
+    print(f"[debug] parse_uk_lottery_csv: parsed {len(draws)} draws for {page_id}")
+    return draws
 
 
 
@@ -831,7 +894,12 @@ def fetch_csv(draw_cfg):
     if not txt:
         print(f"[warning] No CSV content fetched from {csv_url}")
         return []
-    return parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
+    pid = draw_cfg.get("page_id")
+    if pid in ("euromillions", "euromillions-hotpicks", "lotto", "lotto-hotpicks", "thunderball", "set-for-life"):
+        return parse_uk_lottery_csv(txt, page_id=pid)
+    else:
+        return parse_csv_text(txt, page_id=pid)
+
 
 
 
