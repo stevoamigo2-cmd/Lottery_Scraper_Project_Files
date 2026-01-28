@@ -218,22 +218,34 @@ def _normalize_and_append(draws_list, date_obj, mains, bonus, page_id=None):
     draws_list.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
 
 
+# --- Paste/replace this scrape_html in your module ---
 def scrape_html(draw_cfg):
     """
     More resilient HTML scraping fallback:
-    - Try the original selector
-    - If nothing found, search for list items or table rows containing a date & numbers
+    - Tries multiple known selectors and attribute-based extractions.
+    - Falls back to scanning nodes for a date + numbers.
+    Returns list of {"date": ISOdate, "main": [...], "bonus": [...]} (newest-first).
     """
     url = draw_cfg.get("html_url")
     if not url:
         return []
     print(f"[debug] Scrape HTML: {url}")
     soup = fetch_soup(url)
-
-    # 1) original specific selector attempt
-    selector = f"#draw_history_{draw_cfg.get('page_id')} ul.list_table_presentation"
-    entries = soup.select(selector)
+    page_id = draw_cfg.get("page_id")
     draws = []
+
+    # Helper: extract ints (1-3 digits), but avoid obvious year token
+    def extract_numbers_from_text(text, date_obj=None):
+        nums = [int(n) for n in re.findall(r'\b(\d{1,3})\b', text)]
+        if date_obj:
+            nums = [n for n in nums if n != date_obj.year]
+        # prefer 1-2 digit lotto tokens, remove improbable >3-digit tokens
+        nums = [n for n in nums if 1 <= n <= 999]
+        return nums
+
+    # 1) Try the original specific selector (if site hasn't changed)
+    selector = f"#draw_history_{page_id} ul.list_table_presentation"
+    entries = soup.select(selector)
     if entries:
         for ul in entries:
             spans = ul.select("span.table_cell_block")
@@ -246,26 +258,69 @@ def scrape_html(draw_cfg):
                     continue
                 mains = extract_numbers_from_span(main_txt)
                 bonuses = extract_numbers_from_span(bonus_txt)
-                _normalize_and_append(draws, date_obj, mains, bonuses, page_id=draw_cfg.get("page_id"))
+                _normalize_and_append(draws, date_obj, mains, bonuses, page_id=page_id)
         if draws:
             return draws
 
-    # 2) generic fallback: find any list/table rows that contain a date and some numbers
-    candidates = soup.find_all(['li', 'tr', 'div'])
+    # 2) Try some alternate selectors commonly used on result pages
+    alt_selectors = [
+        f"div.draw-history", f"div.draw-history__list", f"ul.results", f"div.results-list",
+        f"section.results", f"div.draws", f"ul.draws li", "ul.draws", "div.draw"
+    ]
+    for sel in alt_selectors:
+        nodes = soup.select(sel)
+        if not nodes:
+            continue
+        for node in nodes:
+            txt = node.get_text(" ", strip=True)
+            # find a date inside
+            m = re.search(r'(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4}|\w+\s+\d{1,2},\s*\d{4})', txt)
+            date_obj = try_parse_date_any(m.group(1)) if m else None
+            # Look for data-number attributes or visible numbers as fallback
+            nums = []
+            # data-number-like attributes
+            for el in node.find_all(attrs=True):
+                for a, v in el.attrs.items():
+                    if isinstance(v, str) and re.search(r'\d', v):
+                        # check attributes like data-number="12" or aria-label="12"
+                        if re.match(r'^\d{1,3}$', v.strip()):
+                            nums.append(int(v.strip()))
+                        else:
+                            # extract numeric substrings
+                            nums.extend([int(x) for x in re.findall(r'\b(\d{1,3})\b', v)])
+            # visible numbers
+            if not nums:
+                nums = extract_numbers_from_text(txt, date_obj)
+            # remove date-year tokens
+            if date_obj:
+                nums = [n for n in nums if n != date_obj.year]
+            if not nums:
+                continue
+            # decide main/bonus counts using GAME_SPECS if possible
+            spec = GAME_SPECS.get(page_id) or {}
+            main_count = spec.get("main", 5)
+            bonus_count = spec.get("bonus", 0)
+            mains = nums[:main_count]
+            bonus = nums[main_count: main_count + bonus_count]
+            _normalize_and_append(draws, date_obj or datetime.utcnow().date(), mains, bonus, page_id=page_id)
+        if draws:
+            return draws
+
+    # 3) Generic fallback: scan every li/tr/div block for date + numbers (broader)
+    candidates = soup.find_all(['li', 'tr', 'div', 'article', 'section'])
     for el in candidates:
         text = el.get_text(" ", strip=True)
         if not text:
             continue
-        # require at least 3 numbers and a date-like substring
+        # require at least 3 numeric tokens to reduce noise
         if len(re.findall(r'\d{1,2}', text)) < 3:
             continue
-        # try to parse date substring
         date_match = None
-        m = re.search(r'(\d{1,2}\s+\w{3,9}\s+\d{4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\w+\s+\d{1,2},\s*\d{4})', text)
+        m = re.search(r'(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\w+\s+\d{1,2},\s*\d{4})', text)
         if m:
             date_match = m.group(1)
         if not date_match:
-            m2 = re.search(r'date[:\s]*([^\|\,\-]{6,40})', text, re.I)
+            m2 = re.search(r'draw\s*date[:\s]*([^\|\,\-]{6,40})', text, re.I)
             if m2:
                 date_match = m2.group(1)
         if not date_match:
@@ -274,27 +329,21 @@ def scrape_html(draw_cfg):
         if not date_obj:
             continue
 
-        # extract numeric tokens (allow up to 3 digits in tokenization)
-        nums = [int(x) for x in re.findall(r'\d{1,3}', text)]
-        # remove any stray year tokens (simple heuristic)
-        nums = [n for n in nums if n != date_obj.year]
+        nums = extract_numbers_from_text(text, date_obj)
+        # heuristic: remove long "ticket" numbers or Joker-like tokens
+        nums = [n for n in nums if n < 1000]
 
-        pid = draw_cfg.get("page_id")
-        spec = GAME_SPECS.get(pid) if pid else None
+        spec = GAME_SPECS.get(page_id) or {}
+        main_count = spec.get("main", 5)
+        bonus_count = spec.get("bonus", 0)
+        mains = nums[:main_count]
+        bonus = nums[main_count: main_count + bonus_count]
 
-        if spec:
-            main_count = spec.get("main", 5)
-            bonus_count = spec.get("bonus", 0)
-            mains = nums[:main_count]
-            bonus = nums[main_count: main_count + bonus_count]
-        else:
-            mains = nums[:5]
-            bonus = nums[5:8]
-
-        _normalize_and_append(draws, date_obj, mains, bonus, page_id=pid)
+        _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
 
     print(f"[debug] scrape_html parsed draws: {len(draws)}")
     return draws
+
 
 
 def parse_csv_text(csv_text, page_id=None):
