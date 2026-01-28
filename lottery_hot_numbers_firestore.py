@@ -329,11 +329,8 @@ def scrape_html(draw_cfg):
 
 def parse_csv_text(csv_text, page_id=None):
     """
-    Robust CSV parser:
-    - Force-detect delimiter by inspecting the first non-empty line with common delimiters.
-    - Prefer exact 'Winning Number N' + 'Powerball' columns when present.
-    - Use strict numeric extraction for balls (\b\d{1,2}\b).
-    - Enforce GAME_RANGES for the provided page_id on every path.
+    Robust CSV parser with added support for 'DrawDate,Ball 1,Ball 2,...' style headers
+    (National Lottery API CSV format). Keeps existing fallbacks for other CSV shapes.
     Returns list of {"date": ISOdate, "main": [...], "bonus": [...]}
     """
     if not csv_text:
@@ -343,7 +340,7 @@ def parse_csv_text(csv_text, page_id=None):
     lines = [ln for ln in csv_text.splitlines() if ln.strip()]
     sample = "\n".join(lines[:40]) if lines else csv_text[:4096]
 
-    # --- robust delimiter detection: check header line with common delimiters ---
+    # --- delimiter detection similar to before ---
     first_line = lines[0] if lines else ""
     candidate_delims = [",", "\t", ";"]
     chosen_delim = None
@@ -371,14 +368,164 @@ def parse_csv_text(csv_text, page_id=None):
     f = io.StringIO(csv_text)
     reader = csv.DictReader(f, delimiter=delimiter)
     fieldnames = reader.fieldnames or []
+    fn_lower = [ (fn or "").lower() for fn in fieldnames ]
+
+    # --------- NEW: Explicit support for 'Ball 1','Ball 2',... + 'DrawDate' style CSVs ----------
+    # Detect if headers include a Draw/Date column and at least "ball 1"
+    def has_ball_header(fn_list):
+        for fn in fn_list:
+            if re.search(r'\bball\s*1\b', fn) or re.search(r'\bball1\b', fn):
+                return True
+        return False
+
+    def find_date_field(fn_list):
+        # prefer exact draw/date labels
+        for fn in fn_list:
+            if fn and ('drawdate' in fn.replace(" ", "") or 'draw date' in fn or 'draw' == fn.strip() or 'date' in fn):
+                return fn
+        # fallback for languages (e.g., 'fecha')
+        for fn in fn_list:
+            if fn and ('fecha' in fn):
+                return fn
+        # last resort: any field that contains 'date'
+        for fn in fn_list:
+            if fn and 'date' in fn:
+                return fn
+        return None
+
+    if fieldnames and has_ball_header(fn_lower) and find_date_field(fn_lower):
+        # We'll parse by column names: collect Ball 1..N and bonus-like columns
+        # Build an ordered map of original fieldname -> lowercased
+        fld_map = {fn: (fn or "").lower() for fn in fieldnames}
+
+        # find date column name (original form)
+        date_col = None
+        for orig, low in fld_map.items():
+            if 'drawdate' in low.replace(" ", "") or 'draw date' in low or low.strip() == 'draw' or 'date' == low or 'fecha' in low:
+                date_col = orig
+                break
+        # fallback to the first column if needed
+        if not date_col and fieldnames:
+            date_col = fieldnames[0]
+
+        # build ball column list in order by index: look for 'ball 1', 'ball 2', etc.
+        ball_cols = []
+        for n in range(1, 15):  # up to 14 just in case; will break when not found
+            pat1 = re.compile(r'\bball\s*%d\b' % n)
+            pat2 = re.compile(r'\bball%d\b' % n)
+            found = None
+            for orig, low in fld_map.items():
+                if pat1.search(low) or pat2.search(low):
+                    found = orig
+                    break
+            if found:
+                ball_cols.append(found)
+            else:
+                # stop scanning when a consecutive index missing (but still keep previously found)
+                # However, sometimes 'Ball 6' exists but 'Ball 7' doesn't; break is fine.
+                break
+
+        # identify explicit bonus-like columns (ordered)
+        bonus_tokens = ('bonus', 'thunderball', 'life ball', 'life_ball', 'lucky star', 'luckystar', 'powerball', 'extra')
+        bonus_cols = []
+        for orig, low in fld_map.items():
+            for tok in bonus_tokens:
+                if tok in low:
+                    # avoid adding a column already captured in ball_cols
+                    if orig not in ball_cols and orig != date_col:
+                        bonus_cols.append(orig)
+                    break
+
+        # For euromillions the API uses 'Lucky Star 1' and 'Lucky Star 2' — both will be collected by bonus_cols
+        # Iterate rows
+        f2 = io.StringIO(csv_text)
+        dr = csv.DictReader(f2, delimiter=delimiter)
+        for row in dr:
+            date_str = (row.get(date_col) or "").strip()
+            if not date_str:
+                # try to find any date-like field
+                for k in row.keys():
+                    if k and 'date' in (k or "").lower():
+                        date_str = (row.get(k) or "").strip()
+                        break
+            if not date_str:
+                continue
+            date_obj = try_parse_date_any(date_str)
+            if not date_obj:
+                continue
+
+            mains = []
+            for col in ball_cols:
+                v = (row.get(col) or "").strip()
+                if not v:
+                    continue
+                m = ball_re.search(v)
+                if m:
+                    try:
+                        mains.append(int(m.group(1)))
+                    except Exception:
+                        pass
+
+            # collect bonus numbers from bonus_cols in header order
+            bonuses = []
+            for col in bonus_cols:
+                v = (row.get(col) or "").strip()
+                if not v:
+                    continue
+                m = ball_re.search(v)
+                if m:
+                    try:
+                        bonuses.append(int(m.group(1)))
+                    except Exception:
+                        pass
+
+            # If there are no explicit bonus_cols but there's a "Bonus Ball" labelled differently (e.g., 'Bonus Ball')
+            # it's already captured above via bonus_tokens, but keep fallback: detect fields named 'bonus' if any remain
+            # Enforce game ranges and split into mains/bonus according to GAME_SPECS if available
+            spec = GAME_SPECS.get(page_id) if page_id else None
+            if spec:
+                main_count = spec.get("main", len(mains))
+                # If mains length is smaller than expected, don't invent numbers; just trim/extend as possible
+                if len(mains) >= main_count:
+                    mains = mains[:main_count]
+                    # if we already captured extras in mains (e.g., Ball 6 for lotto), take bonuses from bonus_cols or remaining ball_cols
+                    if bonuses:
+                        bonus = bonuses
+                    else:
+                        bonus = []
+                else:
+                    # not enough mains: try to use bonus_cols to fill if they look numeric
+                    bonus = bonuses
+            else:
+                # no spec: heuristics
+                if len(mains) >= 6:
+                    mains = mains[:6]
+                    bonus = mains[6:] if len(mains) > 6 else bonuses
+                elif len(mains) == 5 and bonuses:
+                    bonus = bonuses
+                else:
+                    # default: first 5 mains, rest bonuses
+                    bonus = bonuses
+
+            mains, bonus = _enforce_ranges(mains, bonus, page_id)
+            _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
+
+        if draws:
+            return draws
+        # if we detected header style but parsed nothing, continue to other fallbacks below
+
+    # ----------------- EXISTING/ORIGINAL PATHS BELOW -----------------
+    # (Keep the rest of the original parse_csv_text implementation as-is)
+    # --- special-case explicit Winning Number columns (Australia-style CSVs) ---
+    f = io.StringIO(csv_text)
+    reader = csv.DictReader(f, delimiter=delimiter)
+    fieldnames = reader.fieldnames or []
     fn_lower = " ".join([(fn or "").lower() for fn in fieldnames])
 
-    # --- special-case explicit Winning Number columns (Australia-style CSVs) ---
     if fieldnames and ("winning number" in fn_lower or "powerball" in fn_lower):
         f2 = io.StringIO(csv_text)
         reader2 = csv.DictReader(f2, delimiter=delimiter)
         for row in reader2:
-            # find date column
             date_str = None
             for k in row:
                 if k and any(tok in (k or "").lower() for tok in ("date", "draw date", "fecha", "draw")):
@@ -390,7 +537,6 @@ def parse_csv_text(csv_text, page_id=None):
             if not date_obj:
                 continue
 
-            # collect Winning Number N columns in index order
             mains = []
             bonus = []
             win_cols = []
@@ -415,7 +561,6 @@ def parse_csv_text(csv_text, page_id=None):
                     except Exception:
                         pass
 
-            # powerball (or equivalent) column
             pb_col = None
             for k in row.keys():
                 if k and 'powerball' in k.lower():
@@ -430,7 +575,6 @@ def parse_csv_text(csv_text, page_id=None):
                     except Exception:
                         pass
 
-            # enforce ranges and append
             mains, bonus = _enforce_ranges(mains, bonus, page_id)
             _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
 
@@ -459,7 +603,6 @@ def parse_csv_text(csv_text, page_id=None):
                     if not date_obj:
                         continue
                 tail = [c.strip() for c in row[1:] if c is not None and str(c).strip() != ""]
-                # drop trailing long Joker-like numeric token
                 if tail and re.fullmatch(r'\d{6,}', tail[-1]):
                     tail = tail[:-1]
                 nums = []
@@ -595,6 +738,7 @@ def parse_csv_text(csv_text, page_id=None):
             _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
 
     return draws
+
 
 
 def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
