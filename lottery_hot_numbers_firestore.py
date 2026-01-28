@@ -10,6 +10,7 @@ import io
 import re
 import csv
 import time
+import requests
 import subprocess
 from datetime import datetime, timedelta
 from collections import Counter
@@ -781,26 +782,39 @@ def parse_sa_lotto_csv(csv_text):
 
 
 
-def fetch_csv_with_curl(url):
-    headers = [
-        "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "-H", "Accept: text/csv",
-        "-H", "Referer: https://www.national-lottery.co.uk/",
-        "-H", "Origin: https://www.national-lottery.co.uk"
-    ]
+
+
+def fetch_csv_national_lottery(url):
+    """
+    Fetch CSV from National Lottery API using requests and browser-like headers.
+    Returns CSV text if successful, empty string otherwise.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "text/csv",
+        "Referer": "https://www.national-lottery.co.uk/",
+        "Origin": "https://www.national-lottery.co.uk",
+    }
+
     try:
-        result = subprocess.run(
-            ["curl", "-sSL", "--fail"] + headers + [url],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        if not result.stdout.strip():
-            print(f"[warning] curl returned empty CSV for {url}")
-        return result.stdout
-    except subprocess.CalledProcessError as e:
-        print(f"[error] curl failed for {url}: {e}")
+        session = requests.Session()
+        response = session.get(url, headers=headers, timeout=15)
+
+        if response.status_code == 200 and response.text.strip():
+            print(f"[debug] CSV fetched: {url}")
+            return response.text
+        else:
+            print(f"[warning] Failed to fetch CSV ({response.status_code}): {url}")
+            return ""
+    except requests.RequestException as e:
+        print(f"[error] Requests failed for {url}: {e}")
         return ""
+
+# Example usage
+url = "https://api-dfe.national-lottery.co.uk/draw-game/results/33/download?interval=ONE_EIGHTY"
+csv_text = fetch_csv_national_lottery(url)
+print(csv_text[:500])  # Preview first 500 characters
+
 
 
 
