@@ -10,8 +10,6 @@ import io
 import re
 import csv
 import time
-import requests
-import subprocess
 from datetime import datetime, timedelta
 from collections import Counter
 
@@ -32,27 +30,23 @@ REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
 
 LOTTERIES = {
     "euromillions": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/33/download?interval=ONE_EIGHTY",
+        "html_url": "https://www.national-lottery.co.uk/results/euromillions/draw-history",
+        "csv_url":  "https://www.national-lottery.co.uk/results/euromillions/draw-history/csv",
         "page_id": "euromillions",
     },
-    "euromillions-hotpicks": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/5/download?interval=ONE_EIGHTY",
-        "page_id": "euromillions-hotpicks",
-    },
     "lotto": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/1/download?interval=ONE_EIGHTY",
+        "html_url": "https://www.national-lottery.co.uk/results/lotto/draw-history",
+        "csv_url":  "https://www.national-lottery.co.uk/results/lotto/draw-history/csv",
         "page_id": "lotto",
     },
-    "lotto-hotpicks": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/2/download?interval=ONE_EIGHTY",
-        "page_id": "lotto-hotpicks",
-    },
     "thunderball": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/4/download?interval=ONE_EIGHTY",
+        "html_url": "https://www.national-lottery.co.uk/results/thunderball/draw-history",
+        "csv_url":  "https://www.national-lottery.co.uk/results/thunderball/draw-history/csv",
         "page_id": "thunderball",
     },
     "set-for-life": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/3/download?interval=ONE_EIGHTY",
+        "html_url": "https://www.national-lottery.co.uk/results/set-for-life/draw-history",
+        "csv_url":  "https://www.national-lottery.co.uk/results/set-for-life/draw-history/csv",
         "page_id": "set-for-life",
     },
     # Third-party / state CSV examples for US multi-jurisdiction games:
@@ -67,6 +61,16 @@ LOTTERIES = {
         # Example CSV from a state portal — replace if invalid for your environment.
         "csv_url": "https://www.texaslottery.com/export/sites/lottery/Games/Powerball/Winning_Numbers/powerball.csv",
         "page_id": "powerball",
+    },
+    "euromillions-hotpicks": {
+        "html_url": "https://www.national-lottery.co.uk/results/euromillions-hotpicks/draw-history",
+        "csv_url": None,
+        "page_id": "euromillions-hotpicks",
+    },
+    "lotto-hotpicks": {
+        "html_url": "https://www.national-lottery.co.uk/results/lotto-hotpicks/draw-history",
+        "csv_url": None,
+        "page_id": "lotto-hotpicks",
     },
     "spain_loterias_sheet": {
         "html_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1",
@@ -781,126 +785,55 @@ def parse_sa_lotto_csv(csv_text):
     return draws
 
 
-
-
-
-def fetch_csv_with_curl(url):
-
-    """
-    Fetch CSV from National Lottery API using requests and browser-like headers.
-    Returns CSV text if successful, empty string otherwise.
-    """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "text/csv",
-        "Referer": "https://www.national-lottery.co.uk/",
-        "Origin": "https://www.national-lottery.co.uk",
-    }
-
-    try:
-        session = requests.Session()
-        response = session.get(url, headers=headers, timeout=15)
-
-        if response.status_code == 200 and response.text.strip():
-            print(f"[debug] CSV fetched: {url}")
-            return response.text
-        else:
-            print(f"[warning] Failed to fetch CSV ({response.status_code}): {url}")
-            return ""
-    except requests.RequestException as e:
-        print(f"[error] Requests failed for {url}: {e}")
-        return ""
-
-# Example usage
-url = "https://api-dfe.national-lottery.co.uk/draw-game/results/33/download?interval=ONE_EIGHTY"
-csv_text = fetch_csv_with_curl(url)
-print(csv_text[:500])  # Preview first 500 characters
-
-
-def parse_uk_lottery_csv(csv_text, page_id=None):
-    """
-    Parse UK National Lottery CSVs (Euromillions, Lotto, Thunderball, Set-for-Life)
-    into a list of {"date": ISOdate, "main": [...], "bonus": [...]}.
-
-    Expects CSV headers like:
-    DrawDate,Ball 1,Ball 2,Ball 3,Ball 4,Ball 5,Lucky Star 1,Lucky Star 2,...
-
-    Args:
-        csv_text (str): CSV content as text.
-        page_id (str): Game identifier, used for _enforce_ranges.
-
-    Returns:
-        List[dict]: Parsed draws, newest-first.
-    """
-    import io
-    import csv
-    draws = []
-    if not csv_text:
-        return draws
-
-    f = io.StringIO(csv_text)
-    reader = csv.DictReader(f)
-    fieldnames_lower = [h.lower() for h in reader.fieldnames or []]
-
-    # Determine which columns are mains and bonus
-    main_cols = []
-    bonus_cols = []
-    for idx, col in enumerate(reader.fieldnames or []):
-        cl = col.lower()
-        if cl.startswith("ball "):
-            main_cols.append(col)
-        elif "lucky star" in cl or "bonus" in cl:
-            bonus_cols.append(col)
-
-    for row in reader:
-        date_str = row.get("DrawDate") or row.get("Draw Date") or row.get("drawdate") or ""
-        date_obj = try_parse_date_any(date_str)
-        if not date_obj:
-            continue
-
-        # Extract main balls
-        mains = []
-        for col in main_cols:
-            val = row.get(col, "").strip()
-            if val.isdigit():
-                mains.append(int(val))
-
-        # Extract bonus balls
-        bonus = []
-        for col in bonus_cols:
-            val = row.get(col, "").strip()
-            if val.isdigit():
-                bonus.append(int(val))
-
-        # enforce numeric ranges per game
-        mains, bonus = _enforce_ranges(mains, bonus, page_id)
-        _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
-
-    # Sort newest-first
-    draws.sort(key=lambda x: x["date"], reverse=True)
-    print(f"[debug] parse_uk_lottery_csv: parsed {len(draws)} draws for {page_id}")
-    return draws
-
-
-
-
-
 def fetch_csv(draw_cfg):
+    """
+    Try a series of CSV url variants and return parsed draws or [].
+    Will attempt different encodings and query param variants.
+    """
     csv_url = draw_cfg.get("csv_url")
-    if not csv_url:
-        return []
-    print(f"[debug] Fetching CSV via curl: {csv_url}")
-    txt = fetch_csv_with_curl(csv_url)
-    if not txt:
-        print(f"[warning] No CSV content fetched from {csv_url}")
-        return []
-    pid = draw_cfg.get("page_id")
-    if pid in ("euromillions", "euromillions-hotpicks", "lotto", "lotto-hotpicks", "thunderball", "set-for-life"):
-        return parse_uk_lottery_csv(txt, page_id=pid)
-    else:
-        return parse_csv_text(txt, page_id=pid)
+    variants = []
+    if csv_url:
+        variants.append(csv_url)
+        if "?" not in csv_url:
+            variants.append(csv_url + "?draws=200")
+    html = draw_cfg.get("html_url", "")
+    if html:
+        if html.endswith("/draw-history"):
+            variants.append(html + "/csv")
+            variants.append(html + "/draw-history/csv")
+        else:
+            variants.append(html.rstrip("/") + "/csv")
+            variants.append(html.rstrip("/") + "/csv?draws=200")
 
+    tried = set()
+    for u in variants:
+        if not u or u in tried:
+            continue
+        tried.add(u)
+        try:
+            print(f"[debug] Attempting CSV URL: {u}")
+            r = requests.get(u, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
+            try:
+                txt = r.content.decode(enc, errors="replace")
+            except Exception:
+                txt = r.content.decode("ISO-8859-1", errors="replace")
+            if draw_cfg.get("page_id") == "sa_lotto":
+                draws = parse_sa_lotto_csv(txt)
+                print(f"[debug] fetch_csv: sa_lotto parsed {len(draws)} rows from {u}")
+            else:
+                draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
 
+            if draws:
+                print(f"[debug] CSV parsed OK from {u} (rows: {len(draws)})")
+                return draws
+            else:
+                sample = txt.splitlines()[:8]
+                print(f"[debug] CSV from {u} parsed 0 draws; sample:\n" + "\n".join(sample))
+        except Exception as e:
+            print(f"[warning] CSV fetch failed for {u}: {e}")
+    return []
 
 
 def filter_recent(draws, days_back):
