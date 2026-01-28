@@ -1,4 +1,4 @@
-```python
+
 #!/usr/bin/env python3
 # lottery_hot_numbers_with_firestore_patched_api.py
 # Original script updated to use National Lottery API download endpoints
