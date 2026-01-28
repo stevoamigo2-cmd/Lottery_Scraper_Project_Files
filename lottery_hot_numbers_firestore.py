@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # lottery_hot_numbers_with_firestore.py
-# Scrape multiple National Lottery & other draw-history pages, compute "hot" numbers,
-# and save results to Firestore. Designed to run inside CI (GitHub Actions)
-# or locally. Uses firebase-admin.
+# Modified to prefer National Lottery API CSV endpoints and to act like a browser
+# Contains full parsing functions (parse_csv_text, scrape_html, scrape_lotteryguru_fortune_thursday, parse_sa_lotto_csv)
 
 import os
 import json
@@ -21,46 +20,58 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ------------ Config ------------
+# Browser-like default headers (modern Chrome UA). These help avoid 403s on the API.
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/csv, text/plain, */*; q=0.01",
+    "Accept-Language": "en-GB,en;q=0.9",
+    "Connection": "keep-alive",
+    "TE": "trailers",
+    "Referer": "https://www.national-lottery.co.uk/",
+    "Origin": "https://www.national-lottery.co.uk",
+}
+
+# Lightweight identifying header used for non-API fallback requests
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; LotteryHotBot/1.0)"}
+
 DAYS_BACK = int(os.environ.get("DAYS_BACK", "60"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
+CSV_FETCH_RETRIES = int(os.environ.get("CSV_FETCH_RETRIES", "3"))
+CSV_FETCH_BACKOFF = float(os.environ.get("CSV_FETCH_BACKOFF", "0.6"))
 
-# NOTE: csv_url values are examples — confirm working CSV download links for your target host.
-# Many official lottery sites or state lottery portals expose CSV downloads, but paths can change
+# Map page ids to National Lottery API game IDs (per user's provided links)
+API_GAME_ID = {
+    "euromillions": 33,
+    "lotto": 1,
+    "thunderball": 4,
+    "set-for-life": 3,
+    "lotto-hotpicks": 2,
+    "euromillions-hotpicks": 5,
+}
 
+# ------------ LOTTERIES config (updated CSV links will be built dynamically for the UK games) ------------
 LOTTERIES = {
     "euromillions": {
         "html_url": "https://www.national-lottery.co.uk/results/euromillions/draw-history",
-        "csv_url":  "https://www.national-lottery.co.uk/results/euromillions/draw-history/csv",
+        "csv_url":  None,  # will be attempted via API_GAME_ID mapping first
         "page_id": "euromillions",
     },
     "lotto": {
         "html_url": "https://www.national-lottery.co.uk/results/lotto/draw-history",
-        "csv_url":  "https://www.national-lottery.co.uk/results/lotto/draw-history/csv",
+        "csv_url":  None,
         "page_id": "lotto",
     },
     "thunderball": {
         "html_url": "https://www.national-lottery.co.uk/results/thunderball/draw-history",
-        "csv_url":  "https://www.national-lottery.co.uk/results/thunderball/draw-history/csv",
+        "csv_url":  None,
         "page_id": "thunderball",
     },
     "set-for-life": {
         "html_url": "https://www.national-lottery.co.uk/results/set-for-life/draw-history",
-        "csv_url":  "https://www.national-lottery.co.uk/results/set-for-life/draw-history/csv",
+        "csv_url":  None,
         "page_id": "set-for-life",
-    },
-    # Third-party / state CSV examples for US multi-jurisdiction games:
-    "megamillions": {
-        "html_url": "https://www.megamillions.com/winning-numbers/previous-drawings.aspx",
-        # Example CSV from a state portal — replace if invalid for your environment.
-        "csv_url": "https://www.texaslottery.com/export/sites/lottery/Games/Mega_Millions/Winning_Numbers/megamillions.csv",
-        "page_id": "megamillions",
-    },
-    "powerball": {
-        "html_url": "https://www.powerball.com/previous-results",
-        # Example CSV from a state portal — replace if invalid for your environment.
-        "csv_url": "https://www.texaslottery.com/export/sites/lottery/Games/Powerball/Winning_Numbers/powerball.csv",
-        "page_id": "powerball",
     },
     "euromillions-hotpicks": {
         "html_url": "https://www.national-lottery.co.uk/results/euromillions-hotpicks/draw-history",
@@ -71,6 +82,17 @@ LOTTERIES = {
         "html_url": "https://www.national-lottery.co.uk/results/lotto-hotpicks/draw-history",
         "csv_url": None,
         "page_id": "lotto-hotpicks",
+    },
+    # keep your non-UK / other entries as before
+    "megamillions": {
+        "html_url": "https://www.megamillions.com/winning-numbers/previous-drawings.aspx",
+        "csv_url": "https://www.texaslottery.com/export/sites/lottery/Games/Mega_Millions/Winning_Numbers/megamillions.csv",
+        "page_id": "megamillions",
+    },
+    "powerball": {
+        "html_url": "https://www.powerball.com/previous-results",
+        "csv_url": "https://www.texaslottery.com/export/sites/lottery/Games/Powerball/Winning_Numbers/powerball.csv",
+        "page_id": "powerball",
     },
     "spain_loterias_sheet": {
         "html_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1",
@@ -115,7 +137,6 @@ GAME_SPECS = {
     "gh-fortune-thursday": {"main": 5, "bonus": 0},
 }
 
-# enforce per-game numeric ranges for parsed balls (module-level)
 GAME_RANGES = {
     "australia_powerball": {"main_max": 35, "bonus_max": 20},
     "powerball": {"main_max": 69, "bonus_max": 26},
@@ -123,21 +144,22 @@ GAME_RANGES = {
     "spain_loterias": {"main_max": 49, "bonus_max": 9},
 }
 
-# Per-game override for how many "top" items to return
 HOT_TOP_N = {
     "australia_powerball": {"top_main": 10, "top_bonus": 10},
 }
 
-
 # ------------ Helpers ------------
-def fetch_url(url):
-    r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+def fetch_url(url, headers=None, session=None, timeout=REQUEST_TIMEOUT):
+    if session is None:
+        session = requests.Session()
+    hdrs = headers or HEADERS
+    r = session.get(url, headers=hdrs, timeout=timeout, allow_redirects=True)
     r.raise_for_status()
     return r.text
 
 
-def fetch_soup(url):
-    txt = fetch_url(url)
+def fetch_soup(url, session=None):
+    txt = fetch_url(url, session=session)
     return BeautifulSoup(txt, "html.parser")
 
 
@@ -182,6 +204,14 @@ def try_parse_date_any(text):
                 return datetime.strptime(m2.group(1), fmt).date()
             except Exception:
                 pass
+
+    # handle dd-Mon-YYYY style like '27-Jan-2026'
+    m3 = re.search(r'(\d{1,2}-[A-Za-z]{3}-\d{4})', text)
+    if m3:
+        try:
+            return datetime.strptime(m3.group(1), "%d-%b-%Y").date()
+        except Exception:
+            pass
 
     return None
 
@@ -785,18 +815,54 @@ def parse_sa_lotto_csv(csv_text):
     return draws
 
 
+# ------------ CSV fetcher improved ------------
+def _build_api_csv_url_for(draw_cfg):
+    pid = draw_cfg.get("page_id")
+    gid = API_GAME_ID.get(pid)
+    if gid:
+        return f"https://api-dfe.national-lottery.co.uk/draw-game/results/{gid}/download?interval=ONE_EIGHTY"
+    return None
+
+
 def fetch_csv(draw_cfg):
     """
     Try a series of CSV url variants and return parsed draws or [].
-    Will attempt different encodings and query param variants.
+    Improved to:
+    - Try National Lottery API download endpoints (for mapped games) first.
+    - Use a session that preloads the site to obtain cookies.
+    - Use browser-like headers and retry on 403 with alternate headers.
     """
-    csv_url = draw_cfg.get("csv_url")
+    # create session and apply browser headers
+    session = requests.Session()
+    session.headers.update(BROWSER_HEADERS.copy())
+
+    # preload homepage & draw page to establish cookies and typical referer flow
+    try:
+        session.get("https://www.national-lottery.co.uk/", timeout=REQUEST_TIMEOUT)
+    except Exception:
+        # ignore preload errors — we'll still try the API endpoint
+        pass
+
+    html = draw_cfg.get("html_url", "")
+    if html:
+        try:
+            # request the actual draw-history page so referer and cookies align
+            session.get(html, timeout=REQUEST_TIMEOUT)
+        except Exception:
+            pass
+
+    # variants: prefer API endpoint if mapped
     variants = []
+    api_url = _build_api_csv_url_for(draw_cfg)
+    if api_url:
+        variants.append(api_url)
+
+    # include any explicit csv_url in config
+    csv_url = draw_cfg.get("csv_url")
     if csv_url:
         variants.append(csv_url)
-        if "?" not in csv_url:
-            variants.append(csv_url + "?draws=200")
-    html = draw_cfg.get("html_url", "")
+
+    # Attempt common derived variants from HTML
     if html:
         if html.endswith("/draw-history"):
             variants.append(html + "/csv")
@@ -805,34 +871,79 @@ def fetch_csv(draw_cfg):
             variants.append(html.rstrip("/") + "/csv")
             variants.append(html.rstrip("/") + "/csv?draws=200")
 
-    tried = set()
+    # remove duplicates while preserving order
+    seen = set()
+    variants_unique = []
     for u in variants:
-        if not u or u in tried:
+        if not u:
             continue
-        tried.add(u)
-        try:
-            print(f"[debug] Attempting CSV URL: {u}")
-            r = requests.get(u, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            r.raise_for_status()
-            enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
-            try:
-                txt = r.content.decode(enc, errors="replace")
-            except Exception:
-                txt = r.content.decode("ISO-8859-1", errors="replace")
-            if draw_cfg.get("page_id") == "sa_lotto":
-                draws = parse_sa_lotto_csv(txt)
-                print(f"[debug] fetch_csv: sa_lotto parsed {len(draws)} rows from {u}")
-            else:
-                draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
+        if u not in seen:
+            seen.add(u)
+            variants_unique.append(u)
 
-            if draws:
-                print(f"[debug] CSV parsed OK from {u} (rows: {len(draws)})")
-                return draws
-            else:
-                sample = txt.splitlines()[:8]
-                print(f"[debug] CSV from {u} parsed 0 draws; sample:\n" + "\n".join(sample))
-        except Exception as e:
-            print(f"[warning] CSV fetch failed for {u}: {e}")
+    # iterate attempts
+    for u in variants_unique:
+        last_exc = None
+        for attempt in range(1, CSV_FETCH_RETRIES + 1):
+            try:
+                print(f"[debug] Attempting CSV URL: {u} (attempt {attempt})")
+                # set referer to the game's html page if present
+                hdrs = session.headers.copy()
+                if html:
+                    hdrs["Referer"] = html
+                # sometimes APIs like a specific Accept header
+                hdrs["Accept"] = "text/csv, text/plain, */*; q=0.01"
+
+                r = session.get(u, headers=hdrs, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+                # if we get a 403, try again with an X-Requested-With and slightly different headers
+                if r.status_code == 403 and attempt < CSV_FETCH_RETRIES:
+                    print(f"[warning] 403 received for {u} — retrying with AJAX-like headers")
+                    session.headers.update({
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Site": "same-origin"
+                    })
+                    time.sleep(CSV_FETCH_BACKOFF * attempt)
+                    continue
+
+                r.raise_for_status()
+                # decode content robustly
+                enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
+                try:
+                    txt = r.content.decode(enc, errors="replace")
+                except Exception:
+                    txt = r.content.decode("ISO-8859-1", errors="replace")
+
+                # parse
+                if draw_cfg.get("page_id") == "sa_lotto":
+                    draws = parse_sa_lotto_csv(txt)
+                    print(f"[debug] fetch_csv: sa_lotto parsed {len(draws)} rows from {u}")
+                else:
+                    draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
+
+                if draws:
+                    print(f"[debug] CSV parsed OK from {u} (rows: {len(draws)})")
+                    return draws
+                else:
+                    sample = txt.splitlines()[:8]
+                    print(f"[debug] CSV from {u} parsed 0 draws; sample:\n" + "\n".join(sample))
+                    # if parsed 0, maybe it's an HTML error page; continue to next variant
+                    break
+            except requests.HTTPError as he:
+                last_exc = he
+                print(f"[warning] HTTP error fetching CSV {u}: {he}")
+                # if 403, try to adjust headers and retry in the next attempt
+                time.sleep(CSV_FETCH_BACKOFF * attempt)
+                continue
+            except Exception as e:
+                last_exc = e
+                print(f"[warning] CSV fetch failed for {u}: {e}")
+                time.sleep(CSV_FETCH_BACKOFF * attempt)
+                continue
+        # if we exhausted attempts for this URL, continue to next variant
+        if last_exc:
+            print(f"[debug] exhausted attempts for {u}: last_exc={last_exc}")
+
     return []
 
 
@@ -925,14 +1036,13 @@ def run_and_save():
         draws = []
         try:
             # prefer CSV when available (more stable than HTML scraping)
-            if cfg.get("csv_url"):
-                try:
-                    draws = fetch_csv(cfg)
-                    if draws:
-                        print(f"[debug] parsed draws from CSV: {len(draws)}")
-                except Exception as e:
-                    print(f"[warning] CSV fetch/parse failed for {key}: {e}")
-                    draws = []
+            try:
+                draws = fetch_csv(cfg)
+                if draws:
+                    print(f"[debug] parsed draws from CSV: {len(draws)}")
+            except Exception as e:
+                print(f"[warning] CSV fetch/parse failed for {key}: {e}")
+                draws = []
 
             # fallback to HTML scraping if CSV empty or not available
             if not draws:
