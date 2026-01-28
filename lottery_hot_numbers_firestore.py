@@ -813,6 +813,7 @@ def fetch_csv_with_curl(url):
 
 
 
+
 def fetch_csv(draw_cfg):
     csv_url = draw_cfg.get("csv_url")
     if not csv_url:
