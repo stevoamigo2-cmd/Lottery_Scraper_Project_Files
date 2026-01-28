@@ -21,7 +21,15 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ------------ Config ------------
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; LotteryHotBot/1.0)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/139.0.0.0 Safari/537.36",
+    "Accept": "text/csv,application/json,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.national-lottery.co.uk/results",
+    "Origin": "https://www.national-lottery.co.uk",
+}
+
 DAYS_BACK = int(os.environ.get("DAYS_BACK", "60"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
 
@@ -780,16 +788,15 @@ def parse_sa_lotto_csv(csv_text):
 
 
 def fetch_csv(draw_cfg):
-    """
-    Fetch CSV directly from the API link and parse it.
-    """
     csv_url = draw_cfg.get("csv_url")
     if not csv_url:
         return []
 
     try:
         print(f"[debug] Fetching CSV from {csv_url}")
-        r = requests.get(csv_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        r = session.get(csv_url, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
         txt = r.content.decode(enc, errors="replace")
@@ -801,6 +808,7 @@ def fetch_csv(draw_cfg):
     except Exception as e:
         print(f"[warning] CSV fetch failed for {draw_cfg.get('page_id')}: {e}")
         return []
+
 
 
 
