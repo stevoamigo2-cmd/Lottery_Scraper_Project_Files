@@ -35,10 +35,9 @@ LOTTERIES = {
         "page_id": "euromillions",
     },
     "lotto": {
-    "html_url": "https://www.national-lottery.co.uk/results/lotto/draw-history",
-    "csv_url": "https://lotterychecker.co.uk/lottery-draw-history-csv.php",
-    "page_id": "lotto",
-    "note": "Uses lotterychecker.co.uk CSV POST endpoint",
+        "html_url": "https://www.national-lottery.co.uk/results/lotto/draw-history",
+        "csv_url":  "https://www.national-lottery.co.uk/results/lotto/draw-history/csv",
+        "page_id": "lotto",
     },
     "thunderball": {
         "html_url": "https://www.national-lottery.co.uk/results/thunderball/draw-history",
@@ -789,44 +788,52 @@ def parse_sa_lotto_csv(csv_text):
 def fetch_csv(draw_cfg):
     """
     Try a series of CSV url variants and return parsed draws or [].
-    Handles GET and POST (for lotterychecker.co.uk).
+    Will attempt different encodings and query param variants.
     """
     csv_url = draw_cfg.get("csv_url")
-    if not csv_url:
-        return []
-
-    try:
-        if "lotterychecker.co.uk" in csv_url:
-            # POST request with form data
-            data = {"lottery": draw_cfg.get("page_id")}  # e.g. "lotto"
-            headers = HEADERS.copy()
-            headers.update({
-                "Referer": draw_cfg.get("html_url", ""),
-                "Origin": "https://lotterychecker.co.uk"
-            })
-            r = requests.post(csv_url, data=data, headers=headers, timeout=REQUEST_TIMEOUT)
+    variants = []
+    if csv_url:
+        variants.append(csv_url)
+        if "?" not in csv_url:
+            variants.append(csv_url + "?draws=200")
+    html = draw_cfg.get("html_url", "")
+    if html:
+        if html.endswith("/draw-history"):
+            variants.append(html + "/csv")
+            variants.append(html + "/draw-history/csv")
         else:
-            # default GET
-            r = requests.get(csv_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
+            variants.append(html.rstrip("/") + "/csv")
+            variants.append(html.rstrip("/") + "/csv?draws=200")
+
+    tried = set()
+    for u in variants:
+        if not u or u in tried:
+            continue
+        tried.add(u)
         try:
-            txt = r.content.decode(enc, errors="replace")
-        except Exception:
-            txt = r.content.decode("ISO-8859-1", errors="replace")
+            print(f"[debug] Attempting CSV URL: {u}")
+            r = requests.get(u, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
+            try:
+                txt = r.content.decode(enc, errors="replace")
+            except Exception:
+                txt = r.content.decode("ISO-8859-1", errors="replace")
+            if draw_cfg.get("page_id") == "sa_lotto":
+                draws = parse_sa_lotto_csv(txt)
+                print(f"[debug] fetch_csv: sa_lotto parsed {len(draws)} rows from {u}")
+            else:
+                draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
 
-        draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
-        if draws:
-            print(f"[debug] fetch_csv: parsed {len(draws)} draws from {csv_url}")
-            return draws
-        else:
-            print(f"[warning] fetch_csv: 0 draws parsed from {csv_url}")
-            return []
-
-    except Exception as e:
-        print(f"[warning] fetch_csv failed for {csv_url}: {e}")
-        return []
-
+            if draws:
+                print(f"[debug] CSV parsed OK from {u} (rows: {len(draws)})")
+                return draws
+            else:
+                sample = txt.splitlines()[:8]
+                print(f"[debug] CSV from {u} parsed 0 draws; sample:\n" + "\n".join(sample))
+        except Exception as e:
+            print(f"[warning] CSV fetch failed for {u}: {e}")
+    return []
 
 
 def filter_recent(draws, days_back):
