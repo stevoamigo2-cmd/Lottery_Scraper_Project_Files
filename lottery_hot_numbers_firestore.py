@@ -1050,33 +1050,30 @@ def run_and_save():
         print(f"\n== Processing {key} ==")
         draws = []
         try:
-            # prefer CSV when available (more stable than HTML scraping)
-            # 1) Try official National Lottery API for known games (fast & reliable)
-page_id = cfg.get("page_id")
-draws = []
-if page_id in GAME_ID_MAP:
-    try:
-        draws = fetch_national_lottery_api(cfg, interval="ONE_EIGHTY")
-        if draws:
-            print(f"[debug] parsed draws from national-lottery API: {len(draws)}")
-    except Exception as e:
-        print(f"[warning] national-lottery API error for {key}: {e}")
-        draws = []
+            # --- 1) Try official National Lottery API for known games (fast & reliable) ---
+            page_id = cfg.get("page_id")
+            if page_id in GAME_ID_MAP:
+                try:
+                    draws = fetch_national_lottery_api(cfg, interval="ONE_EIGHTY")
+                    if draws:
+                        print(f"[debug] parsed draws from national-lottery API: {len(draws)}")
+                except Exception as e:
+                    print(f"[warning] national-lottery API error for {key}: {e}")
+                    draws = []
 
-# 2) prefer CSV when available (legacy fallback)
-if not draws and cfg.get("csv_url"):
-    try:
-        draws = fetch_csv(cfg)
-        if draws:
-            print(f"[debug] parsed draws from CSV: {len(draws)}")
-    except Exception as e:
-        print(f"[warning] CSV fetch/parse failed for {key}: {e}")
-        draws = []
+            # --- 2) CSV fallback (if API didn't return anything) ---
+            if not draws and cfg.get("csv_url"):
+                try:
+                    draws = fetch_csv(cfg)
+                    if draws:
+                        print(f"[debug] parsed draws from CSV: {len(draws)}")
+                except Exception as e:
+                    print(f"[warning] CSV fetch/parse failed for {key}: {e}")
+                    draws = []
 
-
-            # fallback to HTML scraping if CSV empty or not available
+            # --- 3) HTML scraping fallback (if still empty) ---
             if not draws:
-                print("[debug] No draws found by CSV, trying HTML scraping.")
+                print("[debug] No draws found by API/CSV, trying HTML scraping.")
                 if cfg.get("page_id") == "ghana_fortune_thursday":
                     draws = scrape_lotteryguru_fortune_thursday(cfg)
                     print(f"[debug] parsed draws from LotteryGuru: {len(draws)}")
@@ -1084,6 +1081,7 @@ if not draws and cfg.get("csv_url"):
                     draws = scrape_html(cfg)
                     print(f"[debug] parsed draws from HTML: {len(draws)}")
 
+            # filter to recent, compute hot numbers, save results
             recent = filter_recent(draws, DAYS_BACK)
             print(f"[debug] recent draws (last {DAYS_BACK} days): {len(recent)}")
 
@@ -1123,6 +1121,7 @@ if not draws and cfg.get("csv_url"):
             print(f"[error] {key} failed: {e}")
 
     return results
+
 
 
 if __name__ == "__main__":
