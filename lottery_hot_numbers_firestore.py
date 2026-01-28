@@ -123,6 +123,17 @@ GAME_RANGES = {
     "spain_loterias": {"main_max": 49, "bonus_max": 9},
 }
 
+# Map National Lottery page_id -> internal API game id (api-dfe)
+GAME_ID_MAP = {
+    "lotto": 1,
+    "euromillions": 2,
+    "thunderball": 3,
+    "lotto-hotpicks": 4,
+    "euromillions-hotpicks": 5,
+    "set-for-life": 9,
+}
+
+
 # Per-game override for how many "top" items to return
 HOT_TOP_N = {
     "australia_powerball": {"top_main": 10, "top_bonus": 10},
@@ -785,6 +796,121 @@ def parse_sa_lotto_csv(csv_text):
     return draws
 
 
+def fetch_national_lottery_api(draw_cfg, interval="ONE_EIGHTY"):
+    """
+    Fetch from the official api-dfe.national-lottery.co.uk download endpoint
+    for known national-lottery page_ids. Returns list of normalized draws or [].
+    """
+    page_id = draw_cfg.get("page_id")
+    game_id = GAME_ID_MAP.get(page_id)
+    if not game_id:
+        return []
+
+    url = f"https://api-dfe.national-lottery.co.uk/draw-game/results/{game_id}/download"
+    headers = {
+        "User-Agent": HEADERS.get("User-Agent"),
+        "Accept": "application/json",
+        "Origin": "https://www.national-lottery.co.uk",
+        "Referer": draw_cfg.get("html_url") or "https://www.national-lottery.co.uk/",
+    }
+    params = {"interval": interval}
+
+    try:
+        print(f"[debug-api] fetching national-lottery API: {url} params={params}")
+        r = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"[warning] national-lottery API fetch failed for {page_id}: {e}")
+        return []
+
+    draws = []
+    src = data.get("draws") if isinstance(data, dict) else data
+    if not src:
+        # try other common keys
+        if isinstance(data, dict):
+            for k in ("results", "items", "data"):
+                if k in data and isinstance(data[k], list):
+                    src = data[k]
+                    break
+    if not src:
+        print(f"[debug-api] no draws array found in API response for {page_id}")
+        return []
+
+    for row in src:
+        try:
+            # get date
+            dstr = None
+            if isinstance(row, dict):
+                for k in ("drawDate", "draw_date", "date", "publishedDate", "published_at"):
+                    if row.get(k):
+                        dstr = str(row.get(k))
+                        break
+            if not dstr:
+                continue
+            # Normalise date -> date object
+            try:
+                date_obj = try_parse_date_any(dstr) or datetime.strptime(dstr[:10], "%Y-%m-%d").date()
+            except Exception:
+                # skip row if we can't parse date
+                continue
+
+            # get numbers: try common shapes: row["numbers"] (list), row["winningNumbers"] dict, or keys main/bonus
+            mains = []
+            bonus = []
+
+            if isinstance(row, dict):
+                if row.get("numbers") and isinstance(row.get("numbers"), list):
+                    numbers = row.get("numbers")
+                    # flatten if objects like {"value": 12}
+                    flat = []
+                    for n in numbers:
+                        if isinstance(n, dict):
+                            for k in ("value", "number", "num"):
+                                if k in n and str(n[k]).isdigit():
+                                    flat.append(int(n[k])); break
+                        else:
+                            if str(n).isdigit():
+                                flat.append(int(n))
+                    mains = flat
+                elif row.get("winningNumbers") and isinstance(row.get("winningNumbers"), dict):
+                    wn = row.get("winningNumbers")
+                    mains = [int(x) for x in (wn.get("main") or []) if str(x).isdigit()]
+                    supp = wn.get("supplementary") or wn.get("supplementaryNumbers") or wn.get("supplementary_numbers")
+                    if isinstance(supp, list):
+                        bonus = [int(x) for x in supp if str(x).isdigit()]
+                else:
+                    # fallback: look for keys 'main'/'bonus' lists
+                    if row.get("main") and isinstance(row.get("main"), list):
+                        mains = [int(x) for x in row.get("main") if str(x).isdigit()]
+                    if row.get("bonus") and isinstance(row.get("bonus"), list):
+                        bonus = [int(x) for x in row.get("bonus") if str(x).isdigit()]
+
+            # if we have more numbers than spec, truncate
+            spec = GAME_SPECS.get(page_id) or {}
+            main_count = spec.get("main")
+            bonus_count = spec.get("bonus", 0)
+            if main_count and len(mains) > main_count:
+                # some responses may include mains+extras; take the first main_count as mains
+                mains = mains[:main_count]
+            if not bonus and main_count and len(mains) > main_count:
+                bonus = mains[main_count: main_count + bonus_count]
+                mains = mains[:main_count]
+
+            mains, bonus = _enforce_ranges(mains, bonus, page_id)
+            _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
+        except Exception as e:
+            # be forgiving: skip problematic rows
+            print(f"[debug-api] skipping row due to parse error: {e}")
+            continue
+
+    # newest-first
+    draws.sort(key=lambda x: x["date"], reverse=True)
+    print(f"[debug-api] parsed {len(draws)} draws for {page_id} from national-lottery API")
+    return draws
+
+
+
 def fetch_csv(draw_cfg):
     """
     Try a series of CSV url variants and return parsed draws or [].
@@ -925,14 +1051,28 @@ def run_and_save():
         draws = []
         try:
             # prefer CSV when available (more stable than HTML scraping)
-            if cfg.get("csv_url"):
-                try:
-                    draws = fetch_csv(cfg)
-                    if draws:
-                        print(f"[debug] parsed draws from CSV: {len(draws)}")
-                except Exception as e:
-                    print(f"[warning] CSV fetch/parse failed for {key}: {e}")
-                    draws = []
+            # 1) Try official National Lottery API for known games (fast & reliable)
+page_id = cfg.get("page_id")
+draws = []
+if page_id in GAME_ID_MAP:
+    try:
+        draws = fetch_national_lottery_api(cfg, interval="ONE_EIGHTY")
+        if draws:
+            print(f"[debug] parsed draws from national-lottery API: {len(draws)}")
+    except Exception as e:
+        print(f"[warning] national-lottery API error for {key}: {e}")
+        draws = []
+
+# 2) prefer CSV when available (legacy fallback)
+if not draws and cfg.get("csv_url"):
+    try:
+        draws = fetch_csv(cfg)
+        if draws:
+            print(f"[debug] parsed draws from CSV: {len(draws)}")
+    except Exception as e:
+        print(f"[warning] CSV fetch/parse failed for {key}: {e}")
+        draws = []
+
 
             # fallback to HTML scraping if CSV empty or not available
             if not draws:
