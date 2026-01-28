@@ -779,13 +779,6 @@ def parse_sa_lotto_csv(csv_text):
 
     return draws
 
-curl -sSL \
-  -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-  -H "Accept: text/csv" \
-  -H "Referer: https://www.national-lottery.co.uk/" \
-  "https://api-dfe.national-lottery.co.uk/draw-game/results/33/download?interval=ONE_EIGHTY"
-
-
 
 
 def fetch_csv_with_curl(url):
