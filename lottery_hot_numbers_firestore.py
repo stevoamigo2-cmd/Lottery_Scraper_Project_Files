@@ -21,15 +21,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ------------ Config ------------
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/139.0.0.0 Safari/537.36",
-    "Accept": "text/csv,application/json,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Referer": "https://www.national-lottery.co.uk/results",
-    "Origin": "https://www.national-lottery.co.uk",
-}
-
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; LotteryHotBot/1.0)"}
 DAYS_BACK = int(os.environ.get("DAYS_BACK", "60"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
 
@@ -38,27 +30,24 @@ REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
 
 LOTTERIES = {
     "euromillions": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/33/download?interval=ONE_EIGHTY",
+        "html_url": "https://www.national-lottery.co.uk/results/euromillions/draw-history",
+        "csv_url":  "https://www.national-lottery.co.uk/results/euromillions/draw-history/csv",
         "page_id": "euromillions",
     },
-    "euromillions-hotpicks": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/5/download?interval=ONE_EIGHTY",
-        "page_id": "euromillions-hotpicks",
-    },
     "lotto": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/1/download?interval=ONE_EIGHTY",
-        "page_id": "lotto",
-    },
-    "lotto-hotpicks": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/2/download?interval=ONE_EIGHTY",
-        "page_id": "lotto-hotpicks",
+    "html_url": "https://www.national-lottery.co.uk/results/lotto/draw-history",
+    "csv_url": "https://lotterychecker.co.uk/lottery-draw-history-csv.php",
+    "page_id": "lotto",
+    "note": "Uses lotterychecker.co.uk CSV POST endpoint",
     },
     "thunderball": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/4/download?interval=ONE_EIGHTY",
+        "html_url": "https://www.national-lottery.co.uk/results/thunderball/draw-history",
+        "csv_url":  "https://www.national-lottery.co.uk/results/thunderball/draw-history/csv",
         "page_id": "thunderball",
     },
     "set-for-life": {
-        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/3/download?interval=ONE_EIGHTY",
+        "html_url": "https://www.national-lottery.co.uk/results/set-for-life/draw-history",
+        "csv_url":  "https://www.national-lottery.co.uk/results/set-for-life/draw-history/csv",
         "page_id": "set-for-life",
     },
     # Third-party / state CSV examples for US multi-jurisdiction games:
@@ -73,6 +62,16 @@ LOTTERIES = {
         # Example CSV from a state portal — replace if invalid for your environment.
         "csv_url": "https://www.texaslottery.com/export/sites/lottery/Games/Powerball/Winning_Numbers/powerball.csv",
         "page_id": "powerball",
+    },
+    "euromillions-hotpicks": {
+        "html_url": "https://www.national-lottery.co.uk/results/euromillions-hotpicks/draw-history",
+        "csv_url": None,
+        "page_id": "euromillions-hotpicks",
+    },
+    "lotto-hotpicks": {
+        "html_url": "https://www.national-lottery.co.uk/results/lotto-hotpicks/draw-history",
+        "csv_url": None,
+        "page_id": "lotto-hotpicks",
     },
     "spain_loterias_sheet": {
         "html_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1",
@@ -788,27 +787,45 @@ def parse_sa_lotto_csv(csv_text):
 
 
 def fetch_csv(draw_cfg):
+    """
+    Try a series of CSV url variants and return parsed draws or [].
+    Handles GET and POST (for lotterychecker.co.uk).
+    """
     csv_url = draw_cfg.get("csv_url")
     if not csv_url:
         return []
 
     try:
-        print(f"[debug] Fetching CSV from {csv_url}")
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        r = session.get(csv_url, timeout=REQUEST_TIMEOUT)
+        if "lotterychecker.co.uk" in csv_url:
+            # POST request with form data
+            data = {"lottery": draw_cfg.get("page_id")}  # e.g. "lotto"
+            headers = HEADERS.copy()
+            headers.update({
+                "Referer": draw_cfg.get("html_url", ""),
+                "Origin": "https://lotterychecker.co.uk"
+            })
+            r = requests.post(csv_url, data=data, headers=headers, timeout=REQUEST_TIMEOUT)
+        else:
+            # default GET
+            r = requests.get(csv_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
-        txt = r.content.decode(enc, errors="replace")
+        try:
+            txt = r.content.decode(enc, errors="replace")
+        except Exception:
+            txt = r.content.decode("ISO-8859-1", errors="replace")
 
         draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
-        print(f"[debug] parsed {len(draws)} draws from CSV")
-        return draws
+        if draws:
+            print(f"[debug] fetch_csv: parsed {len(draws)} draws from {csv_url}")
+            return draws
+        else:
+            print(f"[warning] fetch_csv: 0 draws parsed from {csv_url}")
+            return []
 
     except Exception as e:
-        print(f"[warning] CSV fetch failed for {draw_cfg.get('page_id')}: {e}")
+        print(f"[warning] fetch_csv failed for {csv_url}: {e}")
         return []
-
 
 
 
