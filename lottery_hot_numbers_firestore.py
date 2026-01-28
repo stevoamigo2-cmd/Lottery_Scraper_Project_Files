@@ -30,23 +30,27 @@ REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
 
 LOTTERIES = {
     "euromillions": {
-        "html_url": "https://www.national-lottery.co.uk/results/euromillions/draw-history",
-        "csv_url":  "https://www.national-lottery.co.uk/results/euromillions/draw-history/csv",
+        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/33/download?interval=ONE_EIGHTY",
         "page_id": "euromillions",
     },
+    "euromillions-hotpicks": {
+        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/5/download?interval=ONE_EIGHTY",
+        "page_id": "euromillions-hotpicks",
+    },
     "lotto": {
-        "html_url": "https://www.national-lottery.co.uk/results/lotto/draw-history",
-        "csv_url":  "https://www.national-lottery.co.uk/results/lotto/draw-history/csv",
+        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/1/download?interval=ONE_EIGHTY",
         "page_id": "lotto",
     },
+    "lotto-hotpicks": {
+        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/2/download?interval=ONE_EIGHTY",
+        "page_id": "lotto-hotpicks",
+    },
     "thunderball": {
-        "html_url": "https://www.national-lottery.co.uk/results/thunderball/draw-history",
-        "csv_url":  "https://www.national-lottery.co.uk/results/thunderball/draw-history/csv",
+        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/4/download?interval=ONE_EIGHTY",
         "page_id": "thunderball",
     },
     "set-for-life": {
-        "html_url": "https://www.national-lottery.co.uk/results/set-for-life/draw-history",
-        "csv_url":  "https://www.national-lottery.co.uk/results/set-for-life/draw-history/csv",
+        "csv_url": "https://api-dfe.national-lottery.co.uk/draw-game/results/3/download?interval=ONE_EIGHTY",
         "page_id": "set-for-life",
     },
     # Third-party / state CSV examples for US multi-jurisdiction games:
@@ -61,16 +65,6 @@ LOTTERIES = {
         # Example CSV from a state portal — replace if invalid for your environment.
         "csv_url": "https://www.texaslottery.com/export/sites/lottery/Games/Powerball/Winning_Numbers/powerball.csv",
         "page_id": "powerball",
-    },
-    "euromillions-hotpicks": {
-        "html_url": "https://www.national-lottery.co.uk/results/euromillions-hotpicks/draw-history",
-        "csv_url": None,
-        "page_id": "euromillions-hotpicks",
-    },
-    "lotto-hotpicks": {
-        "html_url": "https://www.national-lottery.co.uk/results/lotto-hotpicks/draw-history",
-        "csv_url": None,
-        "page_id": "lotto-hotpicks",
     },
     "spain_loterias_sheet": {
         "html_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1",
