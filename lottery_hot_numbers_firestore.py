@@ -218,6 +218,194 @@ def _normalize_and_append(draws_list, date_obj, mains, bonus, page_id=None):
     draws_list.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
 
 
+
+def fetch_draws_json(draw_cfg):
+    """
+    Fetch draw results from likely JSON endpoints (National Lottery).
+    Returns list of {"date": ISOdate, "main": [...], "bonus": [...]} newest-first
+    Tries a couple of URL patterns and handles a few JSON shapes.
+    """
+    page_id = draw_cfg.get("page_id")
+    if not page_id:
+        return []
+    candidates = []
+    base = draw_cfg.get("html_url", "")
+    # primary pattern used by national-lottery frontend
+    candidates.append(f"https://www.national-lottery.co.uk/results/{page_id}/draw-history/draws")
+    # some older/alternate endpoints
+    candidates.append(f"https://www.national-lottery.co.uk/results/{page_id}/draw-history.json")
+    # also try /api variant (rare)
+    candidates.append(f"https://www.national-lottery.co.uk/api/results/{page_id}/draws")
+    # if an html_url exists, attempt a '/draw-history/draws' on that base too
+    if base:
+        if base.endswith("/draw-history"):
+            candidates.append(base.rstrip("/") + "/draws")
+            candidates.append(base.rstrip("/") + "/draw-history/draws")
+        else:
+            candidates.append(base.rstrip("/") + "/draw-history/draws")
+
+    tried = set()
+    draws = []
+    for url in candidates:
+        if not url or url in tried:
+            continue
+        tried.add(url)
+        try:
+            print(f"[debug-json] attempting {url}")
+            r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            data = None
+            try:
+                data = r.json()
+            except Exception:
+                # not JSON, skip
+                print(f"[debug-json] not JSON at {url}")
+                continue
+
+            # Try to detect array directly
+            if isinstance(data, list):
+                src = data
+            elif isinstance(data, dict) and data.get("draws"):
+                src = data.get("draws")
+            elif isinstance(data, dict) and data.get("results"):
+                src = data.get("results")
+            else:
+                # sometimes api returns { "data": {...} }
+                if isinstance(data, dict) and any(isinstance(v, list) for v in data.values()):
+                    # pick the first list-like value that looks like draws
+                    cand = None
+                    for v in data.values():
+                        if isinstance(v, list):
+                            cand = v
+                            break
+                    src = cand or []
+                else:
+                    src = []
+
+            if not src:
+                print(f"[debug-json] JSON at {url} contained no candidate draw list (keys: {list(data.keys())})")
+                continue
+
+            # Normalise entries
+            for row in src:
+                # possible shapes and keys
+                # 1) row["drawDate"] = 'YYYY-MM-DD', row["numbers"] = [n,...]
+                # 2) row["date"] or row["draw_date"] keys
+                # 3) row["winningNumbers"] = {"main": [...], "supplementary": [...]}
+                date_obj = None
+                mains = []
+                bonus = []
+                # date detection
+                for dk in ("drawDate", "date", "draw_date", "draw_date_iso", "drawdate"):
+                    if isinstance(row, dict) and row.get(dk):
+                        try:
+                            # allow date strings like '2026-01-28' or '28 Jan 2026'
+                            dd = str(row.get(dk))
+                            date_obj = try_parse_date_any(dd) or datetime.strptime(dd[:10], "%Y-%m-%d").date()
+                            break
+                        except Exception:
+                            try:
+                                date_obj = try_parse_date_any(str(row.get(dk)))
+                                if date_obj:
+                                    break
+                            except Exception:
+                                date_obj = None
+
+                # numbers detection
+                if isinstance(row, dict):
+                    if row.get("numbers") and isinstance(row.get("numbers"), list):
+                        numbers = row.get("numbers")
+                        # sometimes numbers are objects: {"value": 12}
+                        if numbers and isinstance(numbers[0], dict):
+                            flat = []
+                            for n in numbers:
+                                if isinstance(n, dict):
+                                    for k in ("value", "number", "num"):
+                                        if k in n:
+                                            try:
+                                                flat.append(int(n[k]))
+                                                break
+                                            except Exception:
+                                                pass
+                                else:
+                                    try:
+                                        flat.append(int(n))
+                                    except Exception:
+                                        pass
+                            numbers = flat
+                        mains = numbers
+                    elif row.get("winningNumbers") and isinstance(row.get("winningNumbers"), dict):
+                        wn = row.get("winningNumbers")
+                        # common shape: {"main": [...], "supplementary": [...]}
+                        if isinstance(wn.get("main"), list):
+                            mains = [int(x) for x in wn.get("main") if str(x).isdigit()]
+                            supp = wn.get("supplementary") or wn.get("supplementaryNumbers") or wn.get("supplementary_numbers")
+                            if isinstance(supp, list):
+                                bonus = [int(x) for x in supp if str(x).isdigit()]
+                        else:
+                            # sometimes winningNumbers is list of dicts with 'value'
+                            if isinstance(wn, list):
+                                flat = []
+                                for n in wn:
+                                    if isinstance(n, dict) and n.get("value"):
+                                        flat.append(int(n.get("value")))
+                                mains = flat
+                    # some APIs have "main" and "bonus" directly
+                    elif row.get("main") and isinstance(row.get("main"), list):
+                        mains = [int(x) for x in row.get("main") if str(x).isdigit()]
+                        if row.get("bonus") and isinstance(row.get("bonus"), list):
+                            bonus = [int(x) for x in row.get("bonus") if str(x).isdigit()]
+                    # older shape: keys like "draw" or "numbers_main"/"numbers_bonus"
+                    else:
+                        # flatten any numeric lists found in the row (conservative)
+                        flattened = []
+                        for v in row.values():
+                            if isinstance(v, list) and all((isinstance(x, int) or (isinstance(x, str) and x.isdigit())) for x in v):
+                                flattened.extend([int(x) for x in v])
+                        if flattened:
+                            mains = flattened
+
+                # If date still not found, continue (we need a date)
+                if not date_obj:
+                    # maybe row has 'drawDate' as nested dict etc. try stringifying some keys
+                    for candidate_key in ("draw", "draw_date", "published_at", "publishedDate"):
+                        if isinstance(row, dict) and row.get(candidate_key):
+                            date_obj = try_parse_date_any(str(row.get(candidate_key)))
+                            if date_obj:
+                                break
+
+                if not date_obj:
+                    # skip rows without a valid date
+                    continue
+
+                # If mains were found but length > expected, trim to GAME_SPECS if available
+                spec = GAME_SPECS.get(page_id) or {}
+                main_count = spec.get("main")
+                bonus_count = spec.get("bonus", 0)
+                if main_count and len(mains) > main_count:
+                    mains = mains[:main_count]
+                # if mains filled and bonus empty but spec has bonus_count, split by spec
+                if not bonus and main_count and len(mains) > main_count:
+                    bonus = mains[main_count:main_count+bonus_count]
+                    mains = mains[:main_count]
+
+                mains, bonus = _enforce_ranges(mains, bonus, page_id)
+                _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
+
+            if draws:
+                print(f"[debug-json] parsed {len(draws)} draws from {url}")
+                # newest-first sort
+                draws.sort(key=lambda x: x["date"], reverse=True)
+                return draws
+
+        except Exception as e:
+            print(f"[warning] fetch_draws_json failed for {url}: {e}")
+
+    # nothing found
+    return []
+
+
+
 # --- Paste/replace this scrape_html in your module ---
 def scrape_html(draw_cfg):
     """
@@ -974,7 +1162,23 @@ def run_and_save():
         draws = []
         try:
             # prefer CSV when available (more stable than HTML scraping)
-            if cfg.get("csv_url"):
+                        # 1) For National Lottery pages, try JSON XHR endpoint first (faster/more reliable)
+            draws = []
+            nl_games = {"euromillions", "lotto", "thunderball", "set-for-life", "euromillions-hotpicks", "lotto-hotpicks"}
+            try:
+                if cfg.get("page_id") in nl_games or (cfg.get("html_url") or "").lower().startswith("https://www.national-lottery.co.uk"):
+                    try:
+                        draws = fetch_draws_json(cfg)
+                        if draws:
+                            print(f"[debug] parsed draws from National Lottery JSON: {len(draws)}")
+                    except Exception as e:
+                        print(f"[warning] fetch_draws_json failed for {key}: {e}")
+                        draws = []
+            except Exception:
+                pass
+
+            # 2) If still empty and a CSV URL exists, try CSV
+            if not draws and cfg.get("csv_url"):
                 try:
                     draws = fetch_csv(cfg)
                     if draws:
@@ -982,6 +1186,17 @@ def run_and_save():
                 except Exception as e:
                     print(f"[warning] CSV fetch/parse failed for {key}: {e}")
                     draws = []
+
+            # 3) Fallback: HTML scraping (note: for national-lottery this will usually fail because the site is client-rendered)
+            if not draws:
+                print("[debug] No draws found by JSON/CSV, trying HTML scraping.")
+                if cfg.get("page_id") == "ghana_fortune_thursday":
+                    draws = scrape_lotteryguru_fortune_thursday(cfg)
+                    print(f"[debug] parsed draws from LotteryGuru: {len(draws)}")
+                else:
+                    draws = scrape_html(cfg)
+                    print(f"[debug] parsed draws from HTML: {len(draws)}")
+
 
             # fallback to HTML scraping if CSV empty or not available
             if not draws:
