@@ -813,7 +813,7 @@ def fetch_csv_with_curl(url):
 
 # Example usage
 url = "https://api-dfe.national-lottery.co.uk/draw-game/results/33/download?interval=ONE_EIGHTY"
-csv_text = fetch_csv_national_lottery(url)
+csv_text = fetch_csv_with_curl(url)
 print(csv_text[:500])  # Preview first 500 characters
 
 
