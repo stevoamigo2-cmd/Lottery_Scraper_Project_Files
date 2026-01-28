@@ -781,53 +781,27 @@ def parse_sa_lotto_csv(csv_text):
 
 def fetch_csv(draw_cfg):
     """
-    Try a series of CSV url variants and return parsed draws or [].
-    Will attempt different encodings and query param variants.
+    Fetch CSV directly from the API link and parse it.
     """
     csv_url = draw_cfg.get("csv_url")
-    variants = []
-    if csv_url:
-        variants.append(csv_url)
-        if "?" not in csv_url:
-            variants.append(csv_url + "?draws=200")
-    html = draw_cfg.get("html_url", "")
-    if html:
-        if html.endswith("/draw-history"):
-            variants.append(html + "/csv")
-            variants.append(html + "/draw-history/csv")
-        else:
-            variants.append(html.rstrip("/") + "/csv")
-            variants.append(html.rstrip("/") + "/csv?draws=200")
+    if not csv_url:
+        return []
 
-    tried = set()
-    for u in variants:
-        if not u or u in tried:
-            continue
-        tried.add(u)
-        try:
-            print(f"[debug] Attempting CSV URL: {u}")
-            r = requests.get(u, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            r.raise_for_status()
-            enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
-            try:
-                txt = r.content.decode(enc, errors="replace")
-            except Exception:
-                txt = r.content.decode("ISO-8859-1", errors="replace")
-            if draw_cfg.get("page_id") == "sa_lotto":
-                draws = parse_sa_lotto_csv(txt)
-                print(f"[debug] fetch_csv: sa_lotto parsed {len(draws)} rows from {u}")
-            else:
-                draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
+    try:
+        print(f"[debug] Fetching CSV from {csv_url}")
+        r = requests.get(csv_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
+        txt = r.content.decode(enc, errors="replace")
 
-            if draws:
-                print(f"[debug] CSV parsed OK from {u} (rows: {len(draws)})")
-                return draws
-            else:
-                sample = txt.splitlines()[:8]
-                print(f"[debug] CSV from {u} parsed 0 draws; sample:\n" + "\n".join(sample))
-        except Exception as e:
-            print(f"[warning] CSV fetch failed for {u}: {e}")
-    return []
+        draws = parse_csv_text(txt, page_id=draw_cfg.get("page_id"))
+        print(f"[debug] parsed {len(draws)} draws from CSV")
+        return draws
+
+    except Exception as e:
+        print(f"[warning] CSV fetch failed for {draw_cfg.get('page_id')}: {e}")
+        return []
+
 
 
 def filter_recent(draws, days_back):
