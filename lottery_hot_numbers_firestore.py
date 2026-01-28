@@ -779,24 +779,37 @@ def parse_sa_lotto_csv(csv_text):
 
     return draws
 
+curl -sSL \
+  -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+  -H "Accept: text/csv" \
+  -H "Referer: https://www.national-lottery.co.uk/" \
+  "https://api-dfe.national-lottery.co.uk/draw-game/results/33/download?interval=ONE_EIGHTY"
+
+
 
 
 def fetch_csv_with_curl(url):
-    """
-    Fetch a CSV using the system curl command.
-    Returns text or empty string.
-    """
+    headers = [
+        "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "-H", "Accept: text/csv",
+        "-H", "Referer: https://www.national-lottery.co.uk/",
+        "-H", "Origin: https://www.national-lottery.co.uk"
+    ]
     try:
         result = subprocess.run(
-            ["curl", "-sSL", url],
+            ["curl", "-sSL", "--fail"] + headers + [url],
             capture_output=True,
             text=True,
             check=True,
         )
+        if not result.stdout.strip():
+            print(f"[warning] curl returned empty CSV for {url}")
         return result.stdout
     except subprocess.CalledProcessError as e:
         print(f"[error] curl failed for {url}: {e}")
         return ""
+
+
 
 
 
