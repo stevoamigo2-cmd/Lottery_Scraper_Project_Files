@@ -784,7 +784,8 @@ def parse_sa_lotto_csv(csv_text):
 
 
 
-def fetch_csv_national_lottery(url):
+def fetch_csv_with_curl(url):
+
     """
     Fetch CSV from National Lottery API using requests and browser-like headers.
     Returns CSV text if successful, empty string otherwise.
