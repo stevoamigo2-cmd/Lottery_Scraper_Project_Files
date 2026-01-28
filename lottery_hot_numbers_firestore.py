@@ -31,7 +31,7 @@ REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "15"))
 LOTTERIES = {
     "euromillions": {
         "html_url": "https://www.national-lottery.co.uk/results/euromillions/draw-history",
-        "csv_url":  "https://www.national-lottery.co.uk/results/euromillions/draw-history/csv",
+        "csv_url":  "https://api-dfe.national-lottery.co.uk/draw-game/results/33/download?interval=ONE_EIGHTY",
         "page_id": "euromillions",
     },
     "lotto": {
@@ -99,16 +99,6 @@ LOTTERIES = {
     }
 }
 
-NATLOT_API = {
-    "lotto": 1,
-    "lotto-hotpicks": 2,
-    "euromillions": 3,
-    "euromillions-hotpicks": 4,
-    "thunderball": 33,
-    "set-for-life": 52,
-}
-
-
 GAME_SPECS = {
     "australia_powerball": {"main": 7, "bonus": 1},
     "powerball": {"main": 5, "bonus": 1},
@@ -137,8 +127,6 @@ GAME_RANGES = {
 HOT_TOP_N = {
     "australia_powerball": {"top_main": 10, "top_bonus": 10},
 }
-
-
 
 
 # ------------ Helpers ------------
@@ -797,35 +785,6 @@ def parse_sa_lotto_csv(csv_text):
     return draws
 
 
-def fetch_natlot_api(game_id, interval="ONE_EIGHTY"):
-    url = f"https://api-dfe.national-lottery.co.uk/draw-game/results/{game_id}/download"
-    params = {"interval": interval}
-
-    r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
-
-    draws = []
-    for d in data.get("draws", []):
-        date_obj = try_parse_date_any(d.get("drawDate"))
-        if not date_obj:
-            continue
-
-        mains = d.get("mainNumbers", []) or []
-        bonus = d.get("bonusNumbers", []) or []
-
-        _normalize_and_append(
-            draws,
-            date_obj,
-            mains,
-            bonus,
-            page_id=None
-        )
-
-    return draws
-
-
-
 def fetch_csv(draw_cfg):
     """
     Try a series of CSV url variants and return parsed draws or [].
@@ -966,10 +925,14 @@ def run_and_save():
         draws = []
         try:
             # prefer CSV when available (more stable than HTML scraping)
-            if key in NATLOT_API:
-             print("[debug] Fetching via National Lottery API")
-             draws = fetch_natlot_api(NATLOT_API[key])
-
+            if cfg.get("csv_url"):
+                try:
+                    draws = fetch_csv(cfg)
+                    if draws:
+                        print(f"[debug] parsed draws from CSV: {len(draws)}")
+                except Exception as e:
+                    print(f"[warning] CSV fetch/parse failed for {key}: {e}")
+                    draws = []
 
             # fallback to HTML scraping if CSV empty or not available
             if not draws:
