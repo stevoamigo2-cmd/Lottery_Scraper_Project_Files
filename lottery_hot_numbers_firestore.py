@@ -130,8 +130,11 @@ HOT_TOP_N = {
 
 
 # ------------ Helpers ------------
-def fetch_url(url):
-    r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+def fetch_url(url, extra_headers=None):
+    headers = dict(HEADERS)
+    if extra_headers:
+        headers.update(extra_headers)
+    r = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     return r.text
 
@@ -218,25 +221,100 @@ def _normalize_and_append(draws_list, date_obj, mains, bonus, page_id=None):
     draws_list.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
 
 
+# --- original (kept) scrape_html for fallback ---
+def scrape_html(draw_cfg):
+    """
+    More resilient HTML scraping fallback:
+    - Try the original selector
+    - If nothing found, search for list items or table rows containing a date & numbers
+    """
+    url = draw_cfg.get("html_url")
+    if not url:
+        return []
+    print(f"[debug] Scrape HTML: {url}")
+    soup = fetch_soup(url)
 
+    # 1) original specific selector attempt
+    selector = f"#draw_history_{draw_cfg.get('page_id')} ul.list_table_presentation"
+    entries = soup.select(selector)
+    draws = []
+    if entries:
+        for ul in entries:
+            spans = ul.select("span.table_cell_block")
+            if len(spans) >= 3:
+                date_txt = spans[0].get_text(" ", strip=True)
+                main_txt = spans[2].get_text(" ", strip=True) if len(spans) >= 3 else ""
+                bonus_txt = spans[3].get_text(" ", strip=True) if len(spans) >= 4 else ""
+                date_obj = try_parse_date_any(date_txt)
+                if date_obj is None:
+                    continue
+                mains = extract_numbers_from_span(main_txt)
+                bonuses = extract_numbers_from_span(bonus_txt)
+                _normalize_and_append(draws, date_obj, mains, bonuses, page_id=draw_cfg.get("page_id"))
+        if draws:
+            return draws
+
+    # 2) generic fallback: find any list/table rows that contain a date and some numbers
+    candidates = soup.find_all(['li', 'tr', 'div'])
+    for el in candidates:
+        text = el.get_text(" ", strip=True)
+        if not text:
+            continue
+        # require at least 3 numbers and a date-like substring
+        if len(re.findall(r'\d{1,2}', text)) < 3:
+            continue
+        # try to parse date substring
+        date_match = None
+        m = re.search(r'(\d{1,2}\s+\w{3,9}\s+\d{4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\w+\s+\d{1,2},\s*\d{4})', text)
+        if m:
+            date_match = m.group(1)
+        if not date_match:
+            m2 = re.search(r'date[:\s]*([^\|\,\-]{6,40})', text, re.I)
+            if m2:
+                date_match = m2.group(1)
+        if not date_match:
+            continue
+        date_obj = try_parse_date_any(date_match)
+        if not date_obj:
+            continue
+
+        # extract numeric tokens (allow up to 3 digits in tokenization)
+        nums = [int(x) for x in re.findall(r'\d{1,3}', text)]
+        # remove any stray year tokens (simple heuristic)
+        nums = [n for n in nums if n != date_obj.year]
+
+        pid = draw_cfg.get("page_id")
+        spec = GAME_SPECS.get(pid) if pid else None
+
+        if spec:
+            main_count = spec.get("main", 5)
+            bonus_count = spec.get("bonus", 0)
+            mains = nums[:main_count]
+            bonus = nums[main_count: main_count + bonus_count]
+        else:
+            mains = nums[:5]
+            bonus = nums[5:8]
+
+        _normalize_and_append(draws, date_obj, mains, bonus, page_id=pid)
+
+    print(f"[debug] scrape_html parsed draws: {len(draws)}")
+    return draws
+
+
+# ------------ NEW: National Lottery JSON fetcher ------------
 def fetch_draws_json(draw_cfg):
     """
     Fetch draw results from likely JSON endpoints (National Lottery).
     Returns list of {"date": ISOdate, "main": [...], "bonus": [...]} newest-first
-    Tries a couple of URL patterns and handles a few JSON shapes.
     """
     page_id = draw_cfg.get("page_id")
     if not page_id:
         return []
     candidates = []
     base = draw_cfg.get("html_url", "")
-    # primary pattern used by national-lottery frontend
     candidates.append(f"https://www.national-lottery.co.uk/results/{page_id}/draw-history/draws")
-    # some older/alternate endpoints
     candidates.append(f"https://www.national-lottery.co.uk/results/{page_id}/draw-history.json")
-    # also try /api variant (rare)
     candidates.append(f"https://www.national-lottery.co.uk/api/results/{page_id}/draws")
-    # if an html_url exists, attempt a '/draw-history/draws' on that base too
     if base:
         if base.endswith("/draw-history"):
             candidates.append(base.rstrip("/") + "/draws")
@@ -252,17 +330,21 @@ def fetch_draws_json(draw_cfg):
         tried.add(url)
         try:
             print(f"[debug-json] attempting {url}")
-            r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            # use a browser-like Accept/Referer for reliability
+            headers = {
+                "User-Agent": HEADERS.get("User-Agent"),
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Referer": draw_cfg.get("html_url") or "https://www.national-lottery.co.uk/",
+            }
+            r = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
-            data = None
             try:
                 data = r.json()
             except Exception:
-                # not JSON, skip
                 print(f"[debug-json] not JSON at {url}")
                 continue
 
-            # Try to detect array directly
+            # locate the draws list in a few common shapes
             if isinstance(data, list):
                 src = data
             elif isinstance(data, dict) and data.get("draws"):
@@ -270,94 +352,65 @@ def fetch_draws_json(draw_cfg):
             elif isinstance(data, dict) and data.get("results"):
                 src = data.get("results")
             else:
-                # sometimes api returns { "data": {...} }
-                if isinstance(data, dict) and any(isinstance(v, list) for v in data.values()):
-                    # pick the first list-like value that looks like draws
-                    cand = None
+                # choose first list-like value if any
+                cand = None
+                if isinstance(data, dict):
                     for v in data.values():
                         if isinstance(v, list):
                             cand = v
                             break
-                    src = cand or []
-                else:
-                    src = []
+                src = cand or []
 
             if not src:
                 print(f"[debug-json] JSON at {url} contained no candidate draw list (keys: {list(data.keys())})")
                 continue
 
-            # Normalise entries
+            # Normalize rows
             for row in src:
-                # possible shapes and keys
-                # 1) row["drawDate"] = 'YYYY-MM-DD', row["numbers"] = [n,...]
-                # 2) row["date"] or row["draw_date"] keys
-                # 3) row["winningNumbers"] = {"main": [...], "supplementary": [...]}
                 date_obj = None
                 mains = []
                 bonus = []
-                # date detection
-                for dk in ("drawDate", "date", "draw_date", "draw_date_iso", "drawdate"):
-                    if isinstance(row, dict) and row.get(dk):
-                        try:
-                            # allow date strings like '2026-01-28' or '28 Jan 2026'
-                            dd = str(row.get(dk))
-                            date_obj = try_parse_date_any(dd) or datetime.strptime(dd[:10], "%Y-%m-%d").date()
-                            break
-                        except Exception:
-                            try:
-                                date_obj = try_parse_date_any(str(row.get(dk)))
-                                if date_obj:
-                                    break
-                            except Exception:
-                                date_obj = None
-
-                # numbers detection
                 if isinstance(row, dict):
+                    for dk in ("drawDate", "date", "draw_date", "drawdate", "publishedDate"):
+                        if row.get(dk):
+                            try:
+                                dd = str(row.get(dk))
+                                date_obj = try_parse_date_any(dd) or datetime.strptime(dd[:10], "%Y-%m-%d").date()
+                                break
+                            except Exception:
+                                try:
+                                    date_obj = try_parse_date_any(str(row.get(dk)))
+                                    if date_obj:
+                                        break
+                                except Exception:
+                                    date_obj = None
+                    # numbers
                     if row.get("numbers") and isinstance(row.get("numbers"), list):
                         numbers = row.get("numbers")
-                        # sometimes numbers are objects: {"value": 12}
                         if numbers and isinstance(numbers[0], dict):
                             flat = []
                             for n in numbers:
                                 if isinstance(n, dict):
                                     for k in ("value", "number", "num"):
-                                        if k in n:
-                                            try:
-                                                flat.append(int(n[k]))
-                                                break
-                                            except Exception:
-                                                pass
+                                        if k in n and str(n[k]).isdigit():
+                                            flat.append(int(n[k])); break
                                 else:
-                                    try:
+                                    if str(n).isdigit():
                                         flat.append(int(n))
-                                    except Exception:
-                                        pass
                             numbers = flat
-                        mains = numbers
+                        mains = [int(x) for x in numbers if str(x).isdigit()]
                     elif row.get("winningNumbers") and isinstance(row.get("winningNumbers"), dict):
                         wn = row.get("winningNumbers")
-                        # common shape: {"main": [...], "supplementary": [...]}
-                        if isinstance(wn.get("main"), list):
-                            mains = [int(x) for x in wn.get("main") if str(x).isdigit()]
-                            supp = wn.get("supplementary") or wn.get("supplementaryNumbers") or wn.get("supplementary_numbers")
-                            if isinstance(supp, list):
-                                bonus = [int(x) for x in supp if str(x).isdigit()]
-                        else:
-                            # sometimes winningNumbers is list of dicts with 'value'
-                            if isinstance(wn, list):
-                                flat = []
-                                for n in wn:
-                                    if isinstance(n, dict) and n.get("value"):
-                                        flat.append(int(n.get("value")))
-                                mains = flat
-                    # some APIs have "main" and "bonus" directly
+                        mains = [int(x) for x in (wn.get("main") or []) if str(x).isdigit()]
+                        supp = wn.get("supplementary") or wn.get("supplementaryNumbers") or wn.get("supplementary_numbers")
+                        if isinstance(supp, list):
+                            bonus = [int(x) for x in supp if str(x).isdigit()]
                     elif row.get("main") and isinstance(row.get("main"), list):
                         mains = [int(x) for x in row.get("main") if str(x).isdigit()]
                         if row.get("bonus") and isinstance(row.get("bonus"), list):
                             bonus = [int(x) for x in row.get("bonus") if str(x).isdigit()]
-                    # older shape: keys like "draw" or "numbers_main"/"numbers_bonus"
                     else:
-                        # flatten any numeric lists found in the row (conservative)
+                        # flatten numeric lists conservatively
                         flattened = []
                         for v in row.values():
                             if isinstance(v, list) and all((isinstance(x, int) or (isinstance(x, str) and x.isdigit())) for x in v):
@@ -365,26 +418,22 @@ def fetch_draws_json(draw_cfg):
                         if flattened:
                             mains = flattened
 
-                # If date still not found, continue (we need a date)
                 if not date_obj:
-                    # maybe row has 'drawDate' as nested dict etc. try stringifying some keys
-                    for candidate_key in ("draw", "draw_date", "published_at", "publishedDate"):
+                    # try some alternate keys
+                    for candidate_key in ("draw", "draw_date", "published_at", "publishedAt"):
                         if isinstance(row, dict) and row.get(candidate_key):
                             date_obj = try_parse_date_any(str(row.get(candidate_key)))
                             if date_obj:
                                 break
 
                 if not date_obj:
-                    # skip rows without a valid date
                     continue
 
-                # If mains were found but length > expected, trim to GAME_SPECS if available
                 spec = GAME_SPECS.get(page_id) or {}
                 main_count = spec.get("main")
                 bonus_count = spec.get("bonus", 0)
                 if main_count and len(mains) > main_count:
                     mains = mains[:main_count]
-                # if mains filled and bonus empty but spec has bonus_count, split by spec
                 if not bonus and main_count and len(mains) > main_count:
                     bonus = mains[main_count:main_count+bonus_count]
                     mains = mains[:main_count]
@@ -393,635 +442,92 @@ def fetch_draws_json(draw_cfg):
                 _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
 
             if draws:
-                print(f"[debug-json] parsed {len(draws)} draws from {url}")
-                # newest-first sort
                 draws.sort(key=lambda x: x["date"], reverse=True)
+                print(f"[debug-json] parsed {len(draws)} draws from {url}")
                 return draws
 
         except Exception as e:
             print(f"[warning] fetch_draws_json failed for {url}: {e}")
 
-    # nothing found
     return []
 
 
-
-# --- Paste/replace this scrape_html in your module ---
-def scrape_html(draw_cfg):
+# ------------ NEW: fallback to national-lottery.com (independent aggregator) ------------
+def fetch_from_national_lottery_dot_com(draw_cfg):
     """
-    More resilient HTML scraping fallback:
-    - Tries multiple known selectors and attribute-based extractions.
-    - Falls back to scanning nodes for a date + numbers.
-    Returns list of {"date": ISOdate, "main": [...], "bonus": [...]} (newest-first).
+    Emergency fallback: scrape national-lottery.com results page (server-side HTML).
+    Returns list of {"date": ISOdate, "main":[...], "bonus":[...]} or [].
     """
-    url = draw_cfg.get("html_url")
-    if not url:
+    url = "https://www.national-lottery.com/results"
+    try:
+        txt = fetch_url(url)
+    except Exception as e:
+        print(f"[fallback] failed to fetch national-lottery.com: {e}")
         return []
-    print(f"[debug] Scrape HTML: {url}")
-    soup = fetch_soup(url)
-    page_id = draw_cfg.get("page_id")
+
+    soup = BeautifulSoup(txt, "html.parser")
+    title_map = {
+        "lotto": "Lotto",
+        "euromillions": "EuroMillions",
+        "thunderball": "Thunderball",
+        "set-for-life": "Set For Life",
+        "lotto-hotpicks": "Lotto HotPicks",
+        "euromillions-hotpicks": "EuroMillions HotPicks",
+    }
+    want_title = title_map.get(draw_cfg.get("page_id"))
+    if not want_title:
+        return []
+
+    header = None
+    for tag in soup.find_all(['h1','h2','h3','h4','strong','b']):
+        txt = (tag.get_text(" ", strip=True) or "").strip()
+        if not txt:
+            continue
+        if txt.lower().startswith(want_title.lower()) or want_title.lower() in txt.lower():
+            header = tag
+            break
+    if not header:
+        return []
+
+    nums = []
+    date_obj = None
+    el = header.find_next_sibling()
+    steps = 0
+    while el and steps < 12:
+        s = el.get_text(" ", strip=True)
+        if s:
+            if date_obj is None:
+                d = try_parse_date_any(s)
+                if d:
+                    date_obj = d
+            found = re.findall(r'\b(\d{1,2})\b', s)
+            if found:
+                nums.extend([int(x) for x in found])
+            if re.match(r'^(Lotto|EuroMillions|Thunderball|Set For Life|Lotto HotPicks|EuroMillions HotPicks)', s, re.I):
+                break
+        el = el.find_next_sibling()
+        steps += 1
+
+    if not nums:
+        return []
+
+    spec = GAME_SPECS.get(draw_cfg.get("page_id"), {})
+    main_count = spec.get("main", 5)
+    bonus_count = spec.get("bonus", 0)
+
+    mains = nums[:main_count]
+    bonus = nums[main_count: main_count + bonus_count]
+
+    if not date_obj:
+        date_obj = datetime.utcnow().date()
+
     draws = []
-
-    # Helper: extract ints (1-3 digits), but avoid obvious year token
-    def extract_numbers_from_text(text, date_obj=None):
-        nums = [int(n) for n in re.findall(r'\b(\d{1,3})\b', text)]
-        if date_obj:
-            nums = [n for n in nums if n != date_obj.year]
-        # prefer 1-2 digit lotto tokens, remove improbable >3-digit tokens
-        nums = [n for n in nums if 1 <= n <= 999]
-        return nums
-
-    # 1) Try the original specific selector (if site hasn't changed)
-    selector = f"#draw_history_{page_id} ul.list_table_presentation"
-    entries = soup.select(selector)
-    if entries:
-        for ul in entries:
-            spans = ul.select("span.table_cell_block")
-            if len(spans) >= 3:
-                date_txt = spans[0].get_text(" ", strip=True)
-                main_txt = spans[2].get_text(" ", strip=True) if len(spans) >= 3 else ""
-                bonus_txt = spans[3].get_text(" ", strip=True) if len(spans) >= 4 else ""
-                date_obj = try_parse_date_any(date_txt)
-                if date_obj is None:
-                    continue
-                mains = extract_numbers_from_span(main_txt)
-                bonuses = extract_numbers_from_span(bonus_txt)
-                _normalize_and_append(draws, date_obj, mains, bonuses, page_id=page_id)
-        if draws:
-            return draws
-
-    # 2) Try some alternate selectors commonly used on result pages
-    alt_selectors = [
-        f"div.draw-history", f"div.draw-history__list", f"ul.results", f"div.results-list",
-        f"section.results", f"div.draws", f"ul.draws li", "ul.draws", "div.draw"
-    ]
-    for sel in alt_selectors:
-        nodes = soup.select(sel)
-        if not nodes:
-            continue
-        for node in nodes:
-            txt = node.get_text(" ", strip=True)
-            # find a date inside
-            m = re.search(r'(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4}|\w+\s+\d{1,2},\s*\d{4})', txt)
-            date_obj = try_parse_date_any(m.group(1)) if m else None
-            # Look for data-number attributes or visible numbers as fallback
-            nums = []
-            # data-number-like attributes
-            for el in node.find_all(attrs=True):
-                for a, v in el.attrs.items():
-                    if isinstance(v, str) and re.search(r'\d', v):
-                        # check attributes like data-number="12" or aria-label="12"
-                        if re.match(r'^\d{1,3}$', v.strip()):
-                            nums.append(int(v.strip()))
-                        else:
-                            # extract numeric substrings
-                            nums.extend([int(x) for x in re.findall(r'\b(\d{1,3})\b', v)])
-            # visible numbers
-            if not nums:
-                nums = extract_numbers_from_text(txt, date_obj)
-            # remove date-year tokens
-            if date_obj:
-                nums = [n for n in nums if n != date_obj.year]
-            if not nums:
-                continue
-            # decide main/bonus counts using GAME_SPECS if possible
-            spec = GAME_SPECS.get(page_id) or {}
-            main_count = spec.get("main", 5)
-            bonus_count = spec.get("bonus", 0)
-            mains = nums[:main_count]
-            bonus = nums[main_count: main_count + bonus_count]
-            _normalize_and_append(draws, date_obj or datetime.utcnow().date(), mains, bonus, page_id=page_id)
-        if draws:
-            return draws
-
-    # 3) Generic fallback: scan every li/tr/div block for date + numbers (broader)
-    candidates = soup.find_all(['li', 'tr', 'div', 'article', 'section'])
-    for el in candidates:
-        text = el.get_text(" ", strip=True)
-        if not text:
-            continue
-        # require at least 3 numeric tokens to reduce noise
-        if len(re.findall(r'\d{1,2}', text)) < 3:
-            continue
-        date_match = None
-        m = re.search(r'(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\w+\s+\d{1,2},\s*\d{4})', text)
-        if m:
-            date_match = m.group(1)
-        if not date_match:
-            m2 = re.search(r'draw\s*date[:\s]*([^\|\,\-]{6,40})', text, re.I)
-            if m2:
-                date_match = m2.group(1)
-        if not date_match:
-            continue
-        date_obj = try_parse_date_any(date_match)
-        if not date_obj:
-            continue
-
-        nums = extract_numbers_from_text(text, date_obj)
-        # heuristic: remove long "ticket" numbers or Joker-like tokens
-        nums = [n for n in nums if n < 1000]
-
-        spec = GAME_SPECS.get(page_id) or {}
-        main_count = spec.get("main", 5)
-        bonus_count = spec.get("bonus", 0)
-        mains = nums[:main_count]
-        bonus = nums[main_count: main_count + bonus_count]
-
-        _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
-
-    print(f"[debug] scrape_html parsed draws: {len(draws)}")
+    _normalize_and_append(draws, date_obj, mains, bonus, page_id=draw_cfg.get("page_id"))
+    print(f"[fallback] parsed {len(draws)} draw(s) from national-lottery.com for {draw_cfg.get('page_id')}")
     return draws
 
 
-
-def parse_csv_text(csv_text, page_id=None):
-    """
-    Robust CSV parser:
-    - Force-detect delimiter by inspecting the first non-empty line with common delimiters.
-    - Prefer exact 'Winning Number N' + 'Powerball' columns when present.
-    - Use strict numeric extraction for balls (\b\d{1,2}\b).
-    - Enforce GAME_RANGES for the provided page_id on every path.
-    Returns list of {"date": ISOdate, "main": [...], "bonus": [...]}
-    """
-    if not csv_text:
-        return []
-
-    csv_text = csv_text.lstrip('\ufeff\ufeff')
-    lines = [ln for ln in csv_text.splitlines() if ln.strip()]
-    sample = "\n".join(lines[:40]) if lines else csv_text[:4096]
-
-    # --- robust delimiter detection: check header line with common delimiters ---
-    first_line = lines[0] if lines else ""
-    candidate_delims = [",", "\t", ";"]
-    chosen_delim = None
-    for delim in candidate_delims:
-        parts = [p.strip().lower() for p in first_line.split(delim)]
-        if any(("winning number" in p or "powerball" in p or "draw date" in p or "draw number" in p or p == "draw") for p in parts):
-            chosen_delim = delim
-            break
-    if not chosen_delim:
-        try:
-            sniffer = csv.Sniffer()
-            dialect = sniffer.sniff(sample)
-            chosen_delim = dialect.delimiter
-        except Exception:
-            chosen_delim = "\t" if "\t" in sample else ","
-
-    delimiter = chosen_delim
-
-    # strict ball-extraction regex (word-boundary 1-2 digits)
-    ball_re = re.compile(r'\b(\d{1,2})\b')
-
-    draws = []
-
-    # Try DictReader first (clean headered CSVs)
-    f = io.StringIO(csv_text)
-    reader = csv.DictReader(f, delimiter=delimiter)
-    fieldnames = reader.fieldnames or []
-    fn_lower = " ".join([(fn or "").lower() for fn in fieldnames])
-
-    # --- special-case explicit Winning Number columns (Australia-style CSVs) ---
-    if fieldnames and ("winning number" in fn_lower or "powerball" in fn_lower):
-        f2 = io.StringIO(csv_text)
-        reader2 = csv.DictReader(f2, delimiter=delimiter)
-        for row in reader2:
-            # find date column
-            date_str = None
-            for k in row:
-                if k and any(tok in (k or "").lower() for tok in ("date", "draw date", "fecha", "draw")):
-                    date_str = (row[k] or "").strip()
-                    break
-            if not date_str:
-                continue
-            date_obj = try_parse_date_any(date_str)
-            if not date_obj:
-                continue
-
-            # collect Winning Number N columns in index order
-            mains = []
-            bonus = []
-            win_cols = []
-            for k in row.keys():
-                if not k:
-                    continue
-                kl = k.lower()
-                m = re.match(r'winning\s*number\s*(\d+)', kl)
-                if m:
-                    try:
-                        idx = int(m.group(1))
-                    except Exception:
-                        idx = 0
-                    win_cols.append((idx, k))
-            win_cols.sort(key=lambda x: x[0])
-            for idx, col in win_cols:
-                v = (row.get(col) or "").strip()
-                mnum = ball_re.search(v)
-                if mnum:
-                    try:
-                        mains.append(int(mnum.group(1)))
-                    except Exception:
-                        pass
-
-            # powerball (or equivalent) column
-            pb_col = None
-            for k in row.keys():
-                if k and 'powerball' in k.lower():
-                    pb_col = k
-                    break
-            if pb_col:
-                v = (row.get(pb_col) or "").strip()
-                mnum = ball_re.search(v)
-                if mnum:
-                    try:
-                        bonus.append(int(mnum.group(1)))
-                    except Exception:
-                        pass
-
-            # enforce ranges and append
-            mains, bonus = _enforce_ranges(mains, bonus, page_id)
-            _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
-
-        if draws:
-            return draws
-
-    # --- Spanish-sheet or row-oriented (first col = date, rest numbers) ---
-    f_rows = io.StringIO(csv_text)
-    reader_rows = csv.reader(f_rows, delimiter=delimiter)
-    all_rows = [r for r in reader_rows if any((c or "").strip() for c in r)]
-    if all_rows:
-        header = all_rows[0]
-        header_lower = " ".join([(h or "").lower() for h in header])
-        if "fecha" in header_lower or "combin" in header_lower or (sum(1 for h in header if not h or h.strip() == "") > 2):
-            data_rows = all_rows[1:]
-            for row in data_rows:
-                if not row:
-                    continue
-                date_str = (row[0] or "").strip()
-                date_obj = try_parse_date_any(date_str)
-                if not date_obj:
-                    joined = " ".join(row)
-                    m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', joined)
-                    if m:
-                        date_obj = try_parse_date_any(m.group(1))
-                    if not date_obj:
-                        continue
-                tail = [c.strip() for c in row[1:] if c is not None and str(c).strip() != ""]
-                # drop trailing long Joker-like numeric token
-                if tail and re.fullmatch(r'\d{6,}', tail[-1]):
-                    tail = tail[:-1]
-                nums = []
-                for v in tail:
-                    for mm in ball_re.findall(v):
-                        nums.append(int(mm))
-                mains = nums[:6] if len(nums) >= 6 else nums
-                bonus = nums[6:8] if len(nums) > 6 else []
-                mains, bonus = _enforce_ranges(mains, bonus, page_id)
-                _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
-
-            if draws:
-                return draws
-
-    # --- headerless / tokenized fallback (space-separated etc.) ---
-    f3 = io.StringIO(csv_text)
-    reader3 = csv.reader(f3, delimiter=delimiter)
-    for raw_row in reader3:
-        if not raw_row:
-            continue
-        if len(raw_row) == 1:
-            tokens = re.split(r'\s+', raw_row[0].strip())
-        else:
-            tokens = [c.strip() for c in raw_row if c is not None and str(c).strip() != ""]
-        if not tokens:
-            continue
-
-        # find date index (three consecutive numeric tokens that look like a date)
-        date_idx = None
-        month = day = year = None
-        for i in range(len(tokens) - 2):
-            if tokens[i].isdigit() and tokens[i+1].isdigit() and tokens[i+2].isdigit():
-                try:
-                    a, b, c = int(tokens[i]), int(tokens[i+1]), int(tokens[i+2])
-                except Exception:
-                    continue
-                if 1900 <= c <= 2100 and 1 <= a <= 12 and 1 <= b <= 31:
-                    date_idx = i
-                    month, day, year = a, b, c
-                    break
-                if 1900 <= c <= 2100 and 1 <= b <= 12 and 1 <= a <= 31:
-                    date_idx = i
-                    month, day, year = b, a, c
-                    break
-
-        if date_idx is not None:
-            game_raw = " ".join(tokens[:date_idx]).lower()
-            game = re.sub(r'[\s\-_]', '', game_raw)
-
-            try:
-                date_obj = datetime(year, month, day).date()
-            except Exception:
-                continue
-
-            numeric_tail = tokens[date_idx+3:]
-            numbers = []
-            for n in numeric_tail:
-                for mm in ball_re.findall(str(n)):
-                    numbers.append(int(mm))
-
-            spec = None
-            for k in GAME_SPECS:
-                if game.startswith(k):
-                    spec = GAME_SPECS[k]
-                    break
-
-            if spec:
-                main_count = spec.get("main", 5)
-                mains = numbers[:main_count]
-                bonus = numbers[main_count:]
-            else:
-                if len(numbers) == 6:
-                    mains = numbers[:5]; bonus = numbers[5:]
-                elif len(numbers) == 7:
-                    mains = numbers[:5]; bonus = numbers[5:]
-                elif len(numbers) == 8:
-                    mains = numbers[:7]; bonus = numbers[7:]
-                else:
-                    mains = numbers[:5]; bonus = numbers[5:]
-
-            mains, bonus = _enforce_ranges(mains, bonus, page_id)
-            _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
-            continue
-
-        # last-resort: find a date snippet and extract last numeric tokens (strict 1-2 digit tokens)
-        joined = " ".join(tokens)
-        date_obj = None
-        m = re.search(r'(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', joined)
-        if m:
-            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
-                try:
-                    date_obj = datetime.strptime(m.group(1), fmt).date()
-                    break
-                except Exception:
-                    pass
-        if not date_obj:
-            parts = tokens[:4]
-            try:
-                if len(parts) >= 3 and all(p.isdigit() for p in parts[:3]):
-                    try:
-                        date_obj = datetime(int(parts[2]), int(parts[0]), int(parts[1])).date()
-                    except Exception:
-                        date_obj = datetime(int(parts[0]), int(parts[1]), int(parts[2])).date()
-            except Exception:
-                date_obj = None
-        if not date_obj:
-            continue
-        nums = ball_re.findall(joined)
-        if len(nums) >= 6:
-            numbers = [int(x) for x in nums[-8:]]
-            if len(numbers) >= 6:
-                mains = numbers[:5]
-                bonus = numbers[5:]
-                mains, bonus = _enforce_ranges(mains, bonus, page_id)
-                _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
-
-    # final small dd.mm.YYYY style fallback (keeps your original behavior)
-    if not draws and lines and re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', lines[0]):
-        for line in lines:
-            parts = re.split(r'[\t,; ]+', line.strip())
-            if len(parts) < 8:
-                continue
-            date_match = re.search(r'\d{1,2}\.\d{1,2}\.\d{4}', line)
-            if not date_match:
-                continue
-            date_str = date_match.group(0)
-            date_obj = try_parse_date_any(date_str)
-            if not date_obj:
-                continue
-            nums = [int(x) for x in parts if re.match(r'^\d+$', x)]
-            mains, bonus = nums[:6], nums[6:7]
-            mains, bonus = _enforce_ranges(mains, bonus, page_id)
-            _normalize_and_append(draws, date_obj, mains, bonus, page_id=page_id)
-
-    return draws
-
-
-def scrape_lotteryguru_fortune_thursday(draw_cfg, days_back=DAYS_BACK):
-    """
-    Robust LotteryGuru Fortune Thursday scraper with pagination.
-    Returns list of {"date": ISOdate, "main": [...], "bonus": []}, newest-first.
-    Fetches pages until we reach the cutoff (days_back) or lastPage.
-    """
-    base_url = draw_cfg.get("html_url")
-    if not base_url:
-        return []
-    print(f"[debug] scrape_lotteryguru_fortune_thursday: base_url={base_url}")
-
-    draws = []
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    # cutoff date (inclusive)
-    cutoff = datetime.utcnow().date() - timedelta(days=days_back)
-
-    # helper to parse a single page
-    def parse_page(html):
-        page_draws = []
-        soup = BeautifulSoup(html, "html.parser")
-
-        # every result block is a div with class lg-line
-        lines = soup.select("div.lg-line")
-        for line in lines:
-            # find the date: there are two .lg-date columns; the second has the actual date & year
-            date_nodes = line.select("div.lg-date")
-            date_obj = None
-            if date_nodes:
-                # try second .lg-date (right aligned) with strong containing "02 Oct" and year after it
-                if len(date_nodes) >= 2:
-                    right = date_nodes[1]
-                    strong = right.find("strong")
-                    year_text = right.get_text(" ", strip=True)
-                    if strong:
-                        # build "02 Oct 2025" by combining strong + remaining text
-                        day_month = strong.get_text(" ", strip=True)
-                        # get text after the strong tag (usually the year)
-                        after = strong.next_sibling
-                        if after:
-                            # sometimes next_sibling is a newline/text containing year
-                            year = str(after).strip()
-                        else:
-                            # fallback: take right.text and remove the strong text
-                            year = year_text.replace(day_month, "").strip()
-                        candidate = f"{day_month} {year}".strip()
-                        date_obj = try_parse_date_any(candidate)
-                # fallback: try to find any date within the whole line
-            if not date_obj:
-                txt = line.get_text(" ", strip=True)
-                m = re.search(r'(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})', txt)
-                if m:
-                    date_obj = try_parse_date_any(m.group(1))
-
-            if not date_obj:
-                continue
-
-            # get numbers from ul.lg-numbers-small.game-number > li.lg-number
-            nums = []
-            ul = line.select_one("ul.lg-numbers-small.game-number")
-            if ul:
-                for li in ul.select("li.lg-number"):
-                    t = li.get_text(" ", strip=True)
-                    if re.search(r'\d', t):
-                        try:
-                            nums.append(int(re.search(r'\d{1,3}', t).group(0)))
-                        except Exception:
-                            pass
-            else:
-                # fallback: collect all numeric tokens in the line and take last 5
-                found = [int(x) for x in re.findall(r'\d{1,3}', line.get_text(" ", strip=True))]
-                found = [n for n in found if n != date_obj.year]
-                nums = found[-5:] if len(found) >= 5 else found
-
-            if len(nums) < 5:
-                continue
-
-            mains = nums[:5]
-            page_draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": []})
-
-        # also return pageInfo attributes for pagination control if present
-        page_info = {}
-        pi = soup.find(id="pageInfo")
-        if pi:
-            try:
-                page_info["pageNumber"] = int(pi.get("pageNumber", 1))
-                page_info["pageSize"] = int(pi.get("pageSize", 10))
-                page_info["lastPage"] = int(pi.get("lastPage", 1))
-                page_info["totalElementCount"] = int(pi.get("totalElementCount", 0))
-            except Exception:
-                pass
-
-        return page_draws, page_info
-
-    # first request to discover pagination meta
-    page = 1
-    last_page = None
-    while True:
-        url = base_url if "?page=" in base_url else base_url.rstrip("/") + (f"?page={page}" if page > 1 else "")
-        try:
-            print(f"[debug] fetch page {page}: {url}")
-            r = session.get(url, timeout=REQUEST_TIMEOUT)
-            r.raise_for_status()
-            page_draws, page_info = parse_page(r.text)
-            print(f"[debug] page {page} parsed draws: {len(page_draws)}")
-            if page_info.get("lastPage"):
-                last_page = page_info["lastPage"]
-        except Exception as e:
-            print(f"[warning] fetch/parse failed for page {page}: {e}")
-            break
-
-        draws.extend(page_draws)
-
-        oldest_on_page = None
-        try:
-            dates_on_page = [datetime.fromisoformat(d["date"]).date() for d in page_draws]
-            if dates_on_page:
-                oldest_on_page = min(dates_on_page)
-        except Exception:
-            oldest_on_page = None
-
-        if oldest_on_page and oldest_on_page < cutoff:
-            print(f"[debug] reached cutoff on page {page} (oldest_on_page={oldest_on_page} < cutoff={cutoff})")
-            break
-
-        page += 1
-        if last_page and page > last_page:
-            break
-        if page > 50:
-            print("[warning] reached page cap (50), stopping")
-            break
-        time.sleep(0.25)
-
-    # dedupe by date+numbers (sometimes duplicates across pages) and sort newest-first
-    seen = set()
-    deduped = []
-    for d in draws:
-        key = (d["date"], tuple(d.get("main", [])), tuple(d.get("bonus", [])))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(d)
-
-    deduped.sort(key=lambda x: x["date"], reverse=True)
-    print(f"[debug] scrape_lotteryguru_fortune_thursday: total parsed draws after paging={len(deduped)}")
-    return deduped
-
-
-def parse_sa_lotto_csv(csv_text):
-    """
-    Robust parser for South Africa Lotto CSV (handles dd.mm.YYYY and other variants).
-    Returns list of {"date": ISOdate, "main": [...], "bonus": [...]}
-    """
-    draws = []
-    if not csv_text:
-        return draws
-
-    lines = [ln for ln in csv_text.splitlines() if ln.strip()]
-    for line in lines:
-        # Split on tabs/commas/spaces; keep tokens
-        parts = re.split(r'[\t,]+|\s{2,}|\s+', line.strip())
-        if len(parts) < 3:
-            continue
-
-        # Attempt to parse date from parts[1] (most files use this)
-        date_obj = None
-        if len(parts) > 1:
-            p = parts[1].strip()
-            m_dot = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$', p)
-            if m_dot:
-                try:
-                    date_obj = datetime.strptime(p, "%d.%m.%Y").date()
-                except Exception:
-                    date_obj = None
-            else:
-                date_obj = try_parse_date_any(p)
-
-        # fallback: try to find a dd.mm.YYYY anywhere on the line
-        if not date_obj:
-            m_any = re.search(r'(\d{1,2}\.\d{1,2}\.\d{4})', line)
-            if m_any:
-                try:
-                    date_obj = datetime.strptime(m_any.group(1), "%d.%m.%Y").date()
-                except Exception:
-                    date_obj = try_parse_date_any(m_any.group(1))
-
-        if not date_obj:
-            continue
-
-        # Collect numeric tokens after the date column (ignore draw number at parts[0])
-        nums = []
-        for token in parts[2:]:
-            if not token:
-                continue
-            m = re.search(r'(\d{1,3})', token)
-            if m:
-                try:
-                    nums.append(int(m.group(1)))
-                except Exception:
-                    pass
-
-        if len(nums) < 6:
-            continue
-
-        mains = nums[:6]
-        bonus = nums[6:7] if len(nums) >= 7 else []
-
-        draws.append({"date": date_obj.isoformat(), "main": mains, "bonus": bonus})
-
-    if draws:
-        print(f"[debug] parse_sa_lotto_csv: parsed {len(draws)} rows, sample: {draws[:3]}")
-    else:
-        print("[debug] parse_sa_lotto_csv: parsed 0 rows (no valid lines)")
-
-    return draws
-
-
+# ------------ CSV parser / fetcher (small tweak: send Referer where applicable) ------------
 def fetch_csv(draw_cfg):
     """
     Try a series of CSV url variants and return parsed draws or [].
@@ -1049,7 +555,11 @@ def fetch_csv(draw_cfg):
         tried.add(u)
         try:
             print(f"[debug] Attempting CSV URL: {u}")
-            r = requests.get(u, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            # include Referer for National Lottery CSV endpoints (helps some protections)
+            headers = dict(HEADERS)
+            if "national-lottery.co.uk" in u:
+                headers.update({"Referer": draw_cfg.get("html_url") or "https://www.national-lottery.co.uk/"})
+            r = requests.get(u, headers=headers, timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             enc = r.encoding or getattr(r, "apparent_encoding", None) or "utf-8"
             try:
@@ -1161,23 +671,17 @@ def run_and_save():
         print(f"\n== Processing {key} ==")
         draws = []
         try:
-            # prefer CSV when available (more stable than HTML scraping)
-                        # 1) For National Lottery pages, try JSON XHR endpoint first (faster/more reliable)
-            draws = []
-            nl_games = {"euromillions", "lotto", "thunderball", "set-for-life", "euromillions-hotpicks", "lotto-hotpicks"}
+            # TRY ORDER: official JSON -> CSV -> national-lottery.com fallback -> HTML
+            # 1) JSON (fast/reliable for national-lottery.co.uk games)
             try:
-                if cfg.get("page_id") in nl_games or (cfg.get("html_url") or "").lower().startswith("https://www.national-lottery.co.uk"):
-                    try:
-                        draws = fetch_draws_json(cfg)
-                        if draws:
-                            print(f"[debug] parsed draws from National Lottery JSON: {len(draws)}")
-                    except Exception as e:
-                        print(f"[warning] fetch_draws_json failed for {key}: {e}")
-                        draws = []
-            except Exception:
-                pass
+                draws = fetch_draws_json(cfg)
+                if draws:
+                    print(f"[debug] parsed draws from official JSON: {len(draws)}")
+            except Exception as e:
+                print(f"[warning] fetch_draws_json error for {key}: {e}")
+                draws = []
 
-            # 2) If still empty and a CSV URL exists, try CSV
+            # 2) CSV (if still empty)
             if not draws and cfg.get("csv_url"):
                 try:
                     draws = fetch_csv(cfg)
@@ -1187,20 +691,20 @@ def run_and_save():
                     print(f"[warning] CSV fetch/parse failed for {key}: {e}")
                     draws = []
 
-            # 3) Fallback: HTML scraping (note: for national-lottery this will usually fail because the site is client-rendered)
-            if not draws:
-                print("[debug] No draws found by JSON/CSV, trying HTML scraping.")
-                if cfg.get("page_id") == "ghana_fortune_thursday":
-                    draws = scrape_lotteryguru_fortune_thursday(cfg)
-                    print(f"[debug] parsed draws from LotteryGuru: {len(draws)}")
-                else:
-                    draws = scrape_html(cfg)
-                    print(f"[debug] parsed draws from HTML: {len(draws)}")
+            # 3) emergency fallback to independent site (only for UK games)
+            nl_games = {"euromillions", "lotto", "thunderball", "set-for-life", "euromillions-hotpicks", "lotto-hotpicks"}
+            if not draws and cfg.get("page_id") in nl_games:
+                try:
+                    draws = fetch_from_national_lottery_dot_com(cfg)
+                    if draws:
+                        print(f"[debug] parsed draws from national-lottery.com: {len(draws)}")
+                except Exception as e:
+                    print(f"[warning] national-lottery.com fallback failed for {key}: {e}")
+                    draws = []
 
-
-            # fallback to HTML scraping if CSV empty or not available
+            # 4) lastly, fallback to HTML scraping
             if not draws:
-                print("[debug] No draws found by CSV, trying HTML scraping.")
+                print("[debug] No draws found by JSON/CSV/fallback, trying HTML scraping.")
                 if cfg.get("page_id") == "ghana_fortune_thursday":
                     draws = scrape_lotteryguru_fortune_thursday(cfg)
                     print(f"[debug] parsed draws from LotteryGuru: {len(draws)}")
